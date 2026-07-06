@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { 
   ethers, 
   JsonRpcProvider, 
+  BrowserProvider,
   Contract, 
   Wallet,
   formatEther
@@ -45,7 +46,8 @@ interface EventLog {
 export default function App() {
   // Connection states
   const [rpcUrl, setRpcUrl] = useState('http://127.0.0.1:8545');
-  const [provider, setProvider] = useState<JsonRpcProvider | null>(null);
+  const [provider, setProvider] = useState<JsonRpcProvider | BrowserProvider | null>(null);
+  const [useMetaMask, setUseMetaMask] = useState(false);
   const [isConnected, setIsConnected] = useState(false);
   const [connectionError, setConnectionError] = useState<string | null>(null);
   const [isConnecting, setIsConnecting] = useState(false);
@@ -120,6 +122,7 @@ export default function App() {
       await prov.getNetwork();
       setProvider(prov);
       setIsConnected(true);
+      setUseMetaMask(false);
       
       // Load accounts
       await loadAccounts(prov);
@@ -127,6 +130,40 @@ export default function App() {
       console.error(err);
       setIsConnected(false);
       setConnectionError(err.message || 'Failed to connect to JSON-RPC node');
+      setAccounts([]);
+      setSelectedAddress(null);
+    } finally {
+      setIsConnecting(false);
+    }
+  };
+
+  const connectMetaMask = async () => {
+    if (!(window as any).ethereum) {
+      alert("MetaMask is not installed!");
+      return;
+    }
+    setIsConnecting(true);
+    setConnectionError(null);
+    try {
+      const prov = new BrowserProvider((window as any).ethereum);
+      await prov.send("eth_requestAccounts", []);
+      
+      await prov.getNetwork();
+      setProvider(prov);
+      setIsConnected(true);
+      setUseMetaMask(true);
+      
+      const signer = await prov.getSigner();
+      const address = await signer.getAddress();
+      const balanceWei = await prov.getBalance(address);
+      
+      setAccounts([{ address, balance: parseFloat(formatEther(balanceWei)).toFixed(4) }]);
+      setSelectedAddress(address);
+      setIsUsingCustomWallet(false);
+    } catch (err: any) {
+      console.error(err);
+      setIsConnected(false);
+      setConnectionError(err.message || 'Failed to connect to MetaMask');
       setAccounts([]);
       setSelectedAddress(null);
     } finally {
@@ -161,7 +198,15 @@ export default function App() {
   // Refresh account balances
   const refreshBalances = async () => {
     if (!provider) return;
-    await loadAccounts(provider);
+    if (useMetaMask) {
+      const p = provider as BrowserProvider;
+      const signer = await p.getSigner();
+      const address = await signer.getAddress();
+      const balanceWei = await p.getBalance(address);
+      setAccounts([{ address, balance: parseFloat(formatEther(balanceWei)).toFixed(4) }]);
+    } else {
+      await loadAccounts(provider as JsonRpcProvider);
+    }
   };
 
   // Switch to custom wallet using private key
@@ -195,11 +240,14 @@ export default function App() {
   // Get current active signer
   const getActiveSigner = async () => {
     if (!provider) throw new Error('No provider connected');
+    if (useMetaMask) {
+      return await (provider as BrowserProvider).getSigner();
+    }
     if (isUsingCustomWallet && customWallet) {
       return customWallet;
     }
     if (!selectedAddress) throw new Error('No signer selected');
-    return await provider.getSigner(selectedAddress);
+    return await (provider as JsonRpcProvider).getSigner(selectedAddress);
   };
 
   // Load contract details from address input
@@ -447,6 +495,27 @@ export default function App() {
     setRegisterError(null);
 
     try {
+      // 1. Link Validation
+      if (metadataURI.startsWith('http://') || metadataURI.startsWith('https://')) {
+        try {
+          const response = await fetch(metadataURI);
+          if (!response.ok) {
+            throw new Error(`Failed to fetch URI: ${response.statusText}`);
+          }
+          const buffer = await response.arrayBuffer();
+          const uint8Array = new Uint8Array(buffer);
+          const fetchedHash = ethers.keccak256(uint8Array);
+          
+          if (fetchedHash !== registerHash) {
+             throw new Error("Validation Failed: The hash of the file at the provided URI does not match the uploaded file's hash.");
+          }
+        } catch (fetchErr: any) {
+          throw new Error("Link Validation Error: Could not fetch and validate the file from the URI. " + fetchErr.message);
+        }
+      } else {
+        throw new Error("Validation Failed: URI must be a valid http or https link to fetch and validate.");
+      }
+
       const signer = await getActiveSigner();
       const contractWithSigner = contract.connect(signer) as Contract;
       
@@ -572,7 +641,7 @@ export default function App() {
         <div className="status-indicator">
           <div className={`status-dot ${isConnected ? 'connected' : 'disconnected'}`}></div>
           <span style={{ color: isConnected ? '#34d399' : '#f87171' }}>
-            {isConnected ? 'Local RPC Connected' : 'Local RPC Disconnected'}
+            {isConnected ? (useMetaMask ? 'MetaMask Connected' : 'Local RPC Connected') : 'Disconnected'}
           </span>
           <button 
             className="btn btn-secondary btn-small" 
@@ -594,8 +663,16 @@ export default function App() {
           <div className="glass-card primary-edge">
             <h3 style={{ marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
               <Cpu size={18} style={{ color: 'var(--primary)' }} />
-              Local node config
+              Network Connection
             </h3>
+            
+            <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '1rem' }}>
+               <button className="btn btn-primary" style={{ flex: 1 }} onClick={connectMetaMask} disabled={isConnecting}>
+                  {useMetaMask ? 'MetaMask Connected' : 'Connect MetaMask'}
+               </button>
+            </div>
+
+            <div style={{ margin: '1rem 0', textAlign: 'center', color: 'var(--text-secondary)', fontSize: '0.8rem' }}>OR CONNECT LOCAL NODE</div>
             
             <div className="form-group">
               <label className="form-label">JSON-RPC URL</label>
@@ -645,7 +722,7 @@ export default function App() {
               {!isUsingCustomWallet ? (
                 <>
                   <p style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginBottom: '0.75rem' }}>
-                    Select an unlocked local account. The Hardhat node will sign the transactions automatically.
+                    {useMetaMask ? 'MetaMask account currently connected.' : 'Select an unlocked local account. The Hardhat node will sign the transactions automatically.'}
                   </p>
                   
                   <div className="accounts-container">
