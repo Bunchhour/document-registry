@@ -480,9 +480,33 @@ h1, h2, h3, h4, h5 {
 .file-info-header {
   display: flex;
   justify-content: space-between;
-  align-items: center;
+  align-items: flex-start;
+  gap: 0.75rem;
   font-weight: 600;
   font-size: 0.9rem;
+  min-width: 0;
+}
+
+.file-info-name {
+  color: #fff;
+  display: flex;
+  align-items: flex-start;
+  gap: 0.25rem;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.file-info-name svg {
+  flex-shrink: 0;
+  margin-top: 0.15rem;
+}
+
+.file-info-size {
+  color: var(--text-secondary);
+  flex-shrink: 0;
+  font-size: 0.8rem;
+  white-space: nowrap;
 }
 
 .file-info-hash {
@@ -496,8 +520,15 @@ h1, h2, h3, h4, h5 {
   user-select: all;
   display: flex;
   justify-content: space-between;
-  align-items: center;
+  align-items: flex-start;
   gap: 0.5rem;
+  min-width: 0;
+}
+
+.file-info-hash span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-all;
 }
 
 /* Live Event Logs */
@@ -550,12 +581,14 @@ h1, h2, h3, h4, h5 {
   display: flex;
   flex-direction: column;
   gap: 0.25rem;
+  min-width: 0;
 }
 
 .log-item-row {
   display: flex;
   justify-content: space-between;
   gap: 1rem;
+  min-width: 0;
 }
 
 .log-item-label {
@@ -565,6 +598,8 @@ h1, h2, h3, h4, h5 {
 .log-item-value {
   font-family: monospace;
   color: var(--text-primary);
+  min-width: 0;
+  overflow-wrap: anywhere;
   word-break: break-all;
 }
 
@@ -578,6 +613,8 @@ h1, h2, h3, h4, h5 {
   flex-direction: column;
   gap: 0.75rem;
   animation: slide-up var(--transition-normal);
+  min-width: 0;
+  overflow: hidden;
 }
 
 .verification-result.found {
@@ -588,6 +625,45 @@ h1, h2, h3, h4, h5 {
 .verification-result.not-found {
   background: rgba(239, 68, 68, 0.05);
   border-color: rgba(239, 68, 68, 0.25);
+}
+
+.result-message {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  font-size: 0.85rem;
+  min-width: 0;
+}
+
+.result-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  font-size: 0.8rem;
+  margin-top: 0.25rem;
+  min-width: 0;
+}
+
+.result-row {
+  display: grid;
+  grid-template-columns: minmax(6rem, max-content) minmax(0, 1fr);
+  column-gap: 0.5rem;
+  min-width: 0;
+}
+
+.result-label {
+  color: var(--text-secondary);
+}
+
+.result-value {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.result-value-mono {
+  font-family: monospace;
+  word-break: break-all;
 }
 
 /* General Stats Panel */

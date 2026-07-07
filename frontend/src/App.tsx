@@ -966,14 +966,14 @@ export default function App() {
                 {fileName && computedHash && (
                   <div className="file-info-card">
                     <div className="file-info-header">
-                      <span style={{ color: '#fff', display: 'flex', alignItems: 'center', gap: '0.25rem' }}>
+                      <span className="file-info-name">
                         <FileText size={14} />
                         {fileName}
                       </span>
-                      <span style={{ color: 'var(--text-secondary)', fontSize: '0.8rem' }}>{fileSize}</span>
+                      <span className="file-info-size">{fileSize}</span>
                     </div>
                     <div className="file-info-hash">
-                      <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{computedHash}</span>
+                      <span>{computedHash}</span>
                       <button className="copy-button" onClick={() => triggerCopy(computedHash)} title="Copy Hash">
                         <Clipboard size={14} />
                       </button>
@@ -1036,18 +1036,18 @@ export default function App() {
 
                   {registerSuccess && (
                     <div className="verification-result found" style={{ padding: '0.75rem' }}>
-                      <div style={{ display: 'flex', alignItems: 'flex-start', gap: '0.5rem', fontSize: '0.85rem' }}>
+                      <div className="result-message">
                         <CheckCircle size={16} style={{ marginTop: '0.1rem', flexShrink: 0 }} />
-                        <span style={{ wordBreak: 'break-all' }}>{registerSuccess}</span>
+                        <span className="result-value">{registerSuccess}</span>
                       </div>
                     </div>
                   )}
 
                   {registerError && (
                     <div className="verification-result not-found" style={{ padding: '0.75rem' }}>
-                      <div style={{ display: 'flex', alignItems: 'flex-start', gap: '0.5rem', fontSize: '0.85rem' }}>
+                      <div className="result-message">
                         <AlertTriangle size={16} style={{ marginTop: '0.1rem', flexShrink: 0 }} />
-                        <span>{registerError}</span>
+                        <span className="result-value">{registerError}</span>
                       </div>
                     </div>
                   )}
@@ -1090,18 +1090,18 @@ export default function App() {
                           <CheckCircle size={18} style={{ color: 'var(--success)' }} />
                           <span style={{ color: '#fff' }}>VERIFIED REGISTRATION</span>
                         </div>
-                        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.25rem', fontSize: '0.8rem', marginTop: '0.25rem' }}>
-                          <div>
-                            <span style={{ color: 'var(--text-secondary)' }}>Uploader: </span>
-                            <span style={{ fontFamily: 'monospace' }}>{lookupResult.uploader}</span>
+                        <div className="result-body">
+                          <div className="result-row">
+                            <span className="result-label">Uploader:</span>
+                            <span className="result-value result-value-mono">{lookupResult.uploader}</span>
                           </div>
-                          <div>
-                            <span style={{ color: 'var(--text-secondary)' }}>Metadata: </span>
-                            <span>{lookupResult.metadataURI}</span>
+                          <div className="result-row">
+                            <span className="result-label">Metadata:</span>
+                            <span className="result-value">{lookupResult.metadataURI}</span>
                           </div>
-                          <div>
-                            <span style={{ color: 'var(--text-secondary)' }}>Registered At: </span>
-                            <span>{lookupResult.timestamp}</span>
+                          <div className="result-row">
+                            <span className="result-label">Registered At:</span>
+                            <span className="result-value">{lookupResult.timestamp}</span>
                           </div>
                         </div>
                       </div>
@@ -1120,9 +1120,9 @@ export default function App() {
 
                   {lookupError && (
                     <div className="verification-result not-found" style={{ padding: '0.75rem' }}>
-                      <div style={{ display: 'flex', alignItems: 'flex-start', gap: '0.5rem', fontSize: '0.85rem' }}>
+                      <div className="result-message">
                         <AlertTriangle size={16} style={{ marginTop: '0.1rem', flexShrink: 0 }} />
-                        <span>{lookupError}</span>
+                        <span className="result-value">{lookupError}</span>
                       </div>
                     </div>
                   )}
