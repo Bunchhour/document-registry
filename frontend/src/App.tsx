@@ -43,6 +43,22 @@ interface EventLog {
   txHash: string;
 }
 
+interface UriValidationResponse {
+  ok: boolean;
+  hash: string;
+  byteLength: number;
+  error?: string;
+}
+
+const isHttpUrl = (value: string) => {
+  try {
+    const url = new URL(value);
+    return url.protocol === 'http:' || url.protocol === 'https:';
+  } catch {
+    return false;
+  }
+};
+
 export default function App() {
   // Connection states
   const [rpcUrl, setRpcUrl] = useState('http://127.0.0.1:8545');
@@ -75,7 +91,7 @@ export default function App() {
   const [isHashing, setIsHashing] = useState(false);
 
   // Operation states
-  const [metadataURI, setMetadataURI] = useState('ipfs://');
+  const [metadataURI, setMetadataURI] = useState('https://');
   const [registerHash, setRegisterHash] = useState('');
   const [isRegistering, setIsRegistering] = useState(false);
   const [registerSuccess, setRegisterSuccess] = useState<string | null>(null);
@@ -486,6 +502,60 @@ export default function App() {
     reader.readAsArrayBuffer(file);
   };
 
+  const validateFetchedBytes = (bytes: Uint8Array, expectedHash: string) => {
+    const fetchedHash = ethers.keccak256(bytes);
+
+    if (fetchedHash.toLowerCase() !== expectedHash.toLowerCase()) {
+      throw new Error("Validation Failed: The hash of the file at the provided URI does not match the uploaded file's hash.");
+    }
+  };
+
+  const validateUriInBrowser = async (uri: string, expectedHash: string) => {
+    const response = await fetch(uri);
+
+    if (!response.ok) {
+      throw new Error(`Failed to fetch URI: ${response.statusText || response.status}`);
+    }
+
+    const buffer = await response.arrayBuffer();
+    validateFetchedBytes(new Uint8Array(buffer), expectedHash);
+  };
+
+  const validateUriOnServer = async (uri: string, expectedHash: string) => {
+    const response = await fetch('/api/validate-uri', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ uri, expectedHash })
+    });
+    const result = await response.json() as UriValidationResponse;
+
+    if (!response.ok) {
+      throw new Error(result.error || 'Server-side URI validation failed');
+    }
+
+    if (!result.ok) {
+      throw new Error(`Validation Failed: The hash of the file at the provided URI is ${result.hash}, which does not match the uploaded file's hash.`);
+    }
+  };
+
+  const validateMetadataUri = async (uri: string, expectedHash: string) => {
+    if (!isHttpUrl(uri)) {
+      throw new Error("Validation Failed: URI must be a valid http or https direct file link.");
+    }
+
+    try {
+      await validateUriInBrowser(uri, expectedHash);
+    } catch (browserErr) {
+      try {
+        await validateUriOnServer(uri, expectedHash);
+      } catch (serverErr: any) {
+        const browserMessage = browserErr instanceof Error ? browserErr.message : 'Browser validation failed';
+        throw new Error("Link Validation Error: Could not fetch and validate the file from the URI. " +
+          `${serverErr.message || browserMessage} Browser validation said: ${browserMessage}`);
+      }
+    }
+  };
+
   // Actions
   const handleRegisterDocument = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -496,25 +566,7 @@ export default function App() {
 
     try {
       // 1. Link Validation
-      if (metadataURI.startsWith('http://') || metadataURI.startsWith('https://')) {
-        try {
-          const response = await fetch(metadataURI);
-          if (!response.ok) {
-            throw new Error(`Failed to fetch URI: ${response.statusText}`);
-          }
-          const buffer = await response.arrayBuffer();
-          const uint8Array = new Uint8Array(buffer);
-          const fetchedHash = ethers.keccak256(uint8Array);
-          
-          if (fetchedHash !== registerHash) {
-             throw new Error("Validation Failed: The hash of the file at the provided URI does not match the uploaded file's hash.");
-          }
-        } catch (fetchErr: any) {
-          throw new Error("Link Validation Error: Could not fetch and validate the file from the URI. " + fetchErr.message);
-        }
-      } else {
-        throw new Error("Validation Failed: URI must be a valid http or https link to fetch and validate.");
-      }
+      await validateMetadataUri(metadataURI.trim(), registerHash.trim());
 
       const signer = await getActiveSigner();
       const contractWithSigner = contract.connect(signer) as Contract;
@@ -958,15 +1010,18 @@ export default function App() {
                     </div>
                     
                     <div className="form-group">
-                      <label className="form-label">Metadata URI (Description / IPFS)</label>
+                      <label className="form-label">File URL</label>
                       <input 
                         type="text" 
                         className="form-input" 
                         required
-                        placeholder="ipfs://Qm... or Description" 
+                        placeholder="https://example.com/document.pdf" 
                         value={metadataURI}
                         onChange={(e) => setMetadataURI(e.target.value)}
                       />
+                      <div className="form-help">
+                        Use a direct http or https file link. CORS-enabled locations are validated in the browser; public links fall back to local server validation.
+                      </div>
                     </div>
 
                     <button 

@@ -199,6 +199,13 @@ h1, h2, h3, h4, h5 {
   margin-bottom: 0.5rem;
 }
 
+.form-help {
+  color: var(--text-secondary);
+  font-size: 0.78rem;
+  line-height: 1.45;
+  margin-top: 0.45rem;
+}
+
 .input-container {
   position: relative;
 }
