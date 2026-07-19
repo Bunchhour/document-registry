@@ -22,12 +22,17 @@ import {
   Shield, 
   RotateCw,
   Search,
-  ArrowRightLeft
+  ArrowRightLeft,
+  LogOut
 } from 'lucide-react';
 import DocumentRegistryArtifact from './contracts/DocumentRegistry.json';
+import AuthPage from './AuthPage';
 
 // Destructure from the compiled artifact
 const { abi, bytecode } = DocumentRegistryArtifact;
+
+// Session storage key
+const SESSION_KEY = 'docregistry_session';
 
 interface Account {
   address: string;
@@ -60,7 +65,22 @@ const isHttpUrl = (value: string) => {
 };
 
 export default function App() {
-  // Connection states
+  // ── Auth state ────────────────────────────────────────────────────────────
+  const [currentUser, setCurrentUser] = useState<string | null>(() => {
+    return localStorage.getItem(SESSION_KEY);
+  });
+
+  const handleAuthSuccess = (username: string) => {
+    localStorage.setItem(SESSION_KEY, username);
+    setCurrentUser(username);
+  };
+
+  const handleLogout = () => {
+    localStorage.removeItem(SESSION_KEY);
+    setCurrentUser(null);
+  };
+
+  // ── Connection states ─────────────────────────────────────────────────────
   const [rpcUrl, setRpcUrl] = useState('http://127.0.0.1:8545');
   const [provider, setProvider] = useState<JsonRpcProvider | BrowserProvider | null>(null);
   const [useMetaMask, setUseMetaMask] = useState(false);
@@ -678,6 +698,11 @@ export default function App() {
     }, 2000);
   };
 
+  // Show auth gate if not logged in
+  if (!currentUser) {
+    return <AuthPage onAuthSuccess={handleAuthSuccess} />;
+  }
+
   return (
     <div className="app-container">
       {/* Top Glass Header */}
@@ -686,21 +711,36 @@ export default function App() {
           <Layers size={28} style={{ color: '#6366f1' }} />
           <div>
             <h1>Document Registry</h1>
-            <p style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>Interactive Local Testing Client</p>
+            <p style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>Decentralized Document Verification</p>
           </div>
         </div>
         
-        <div className="status-indicator">
-          <div className={`status-dot ${isConnected ? 'connected' : 'disconnected'}`}></div>
-          <span style={{ color: isConnected ? '#34d399' : '#f87171' }}>
-            {isConnected ? (useMetaMask ? 'MetaMask Connected' : 'Local RPC Connected') : 'Disconnected'}
-          </span>
-          <button 
-            className="btn btn-secondary btn-small" 
-            onClick={() => connectToNode()}
-            style={{ marginLeft: '0.5rem', padding: '0.25rem 0.5rem' }}
-          >
-            <RotateCw size={14} />
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap' }}>
+          {/* Logged-in user chip */}
+          <div className="user-chip">
+            <div className="user-chip-avatar">{currentUser.charAt(0)}</div>
+            <span>{currentUser}</span>
+          </div>
+
+          {/* Network status */}
+          <div className="status-indicator">
+            <div className={`status-dot ${isConnected ? 'connected' : 'disconnected'}`}></div>
+            <span style={{ color: isConnected ? '#34d399' : '#f87171' }}>
+              {isConnected ? (useMetaMask ? 'MetaMask' : 'Local RPC') : 'Disconnected'}
+            </span>
+            <button 
+              className="btn btn-secondary btn-small" 
+              onClick={() => connectToNode()}
+              style={{ marginLeft: '0.25rem', padding: '0.25rem 0.5rem' }}
+            >
+              <RotateCw size={14} />
+            </button>
+          </div>
+
+          {/* Logout button */}
+          <button id="btn-logout" className="btn-logout" onClick={handleLogout}>
+            <LogOut size={14} />
+            Logout
           </button>
         </div>
       </header>
