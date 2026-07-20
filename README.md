@@ -103,6 +103,16 @@ npx hardhat ignition deploy ignition/modules/DocumentRegistry.ts --network local
 ```
 Copy the deployed contract address from the output.
 
+### Add local test ETH to a MetaMask account
+
+With the Hardhat node still running, use the account address and ETH amount options:
+
+```bash
+npm run fund:local -- --account 0xYOUR_METAMASK_ADDRESS --amount 100
+```
+
+The command adds to the account's existing local balance and mines a block so MetaMask can detect the change. This creates development-only ETH on chain `31337`; it cannot fund an account on a public network.
+
 ### Step 3 — Start the frontend
 
 ```bash

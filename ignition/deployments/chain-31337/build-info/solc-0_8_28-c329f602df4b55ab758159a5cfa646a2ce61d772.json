@@ -1,0 +1,49 @@
+{
+  "_format": "hh3-sol-build-info-1",
+  "id": "solc-0_8_28-c329f602df4b55ab758159a5cfa646a2ce61d772",
+  "solcVersion": "0.8.28",
+  "solcLongVersion": "0.8.28+commit.7893614a",
+  "compilerType": "solc",
+  "toolVersions": {
+    "hardhat": "3.9.0"
+  },
+  "userSourceNameMap": {
+    "contracts/DocumentRegistry.sol": "project/contracts/DocumentRegistry.sol"
+  },
+  "input": {
+    "language": "Solidity",
+    "settings": {
+      "evmVersion": "cancun",
+      "optimizer": {
+        "enabled": true,
+        "runs": 200
+      },
+      "outputSelection": {
+        "*": {
+          "": [
+            "ast"
+          ],
+          "*": [
+            "abi",
+            "evm.bytecode.linkReferences",
+            "evm.bytecode.object",
+            "evm.bytecode.opcodes",
+            "evm.bytecode.sourceMap",
+            "evm.deployedBytecode.immutableReferences",
+            "evm.deployedBytecode.linkReferences",
+            "evm.deployedBytecode.object",
+            "evm.deployedBytecode.opcodes",
+            "evm.deployedBytecode.sourceMap",
+            "evm.methodIdentifiers"
+          ]
+        }
+      },
+      "remappings": []
+    },
+    "sources": {
+      "project/contracts/DocumentRegistry.sol": {
+        "content": "// SPDX-License-Identifier: MIT\npragma solidity ^0.8.24;\n\n/// @title DocumentRegistry\n/// @notice Stores a hash + metadata pointer for documents on-chain, so anyone\n///         can later prove a given document existed at a given time.\ncontract DocumentRegistry {\n    // ---------------------------------------------------------------------\n    // State variables\n    // ---------------------------------------------------------------------\n    address public owner;\n    uint256 public documentCount;\n\n    struct Document {\n        address uploader;\n        string metadataURI; // e.g. an IPFS hash or description string\n        uint256 timestamp;\n        bool exists;\n    }\n\n    mapping(bytes32 => Document) private documents;\n\n    // ---------------------------------------------------------------------\n    // Events\n    // ---------------------------------------------------------------------\n    event DocumentRegistered(bytes32 indexed docHash, address indexed uploader, uint256 timestamp);\n    event DocumentRevoked(bytes32 indexed docHash, address indexed revokedBy);\n\n    // ---------------------------------------------------------------------\n    // Access control\n    // ---------------------------------------------------------------------\n    modifier onlyOwner() {\n        require(msg.sender == owner, \"Not authorized: owner only\");\n        _;\n    }\n\n    constructor() {\n        owner = msg.sender;\n    }\n\n    // ---------------------------------------------------------------------\n    // Store function\n    // ---------------------------------------------------------------------\n    function registerDocument(bytes32 docHash, string calldata metadataURI) external {\n        require(docHash != bytes32(0), \"Invalid hash\");\n        require(!documents[docHash].exists, \"Document already registered\");\n        require(bytes(metadataURI).length > 0, \"Metadata URI required\");\n\n        documents[docHash] = Document({\n            uploader: msg.sender,\n            metadataURI: metadataURI,\n            timestamp: block.timestamp,\n            exists: true\n        });\n\n        documentCount += 1;\n        emit DocumentRegistered(docHash, msg.sender, block.timestamp);\n    }\n\n    // ---------------------------------------------------------------------\n    // Retrieve functions\n    // ---------------------------------------------------------------------\n    function getDocument(bytes32 docHash)\n        external\n        view\n        returns (address uploader, string memory metadataURI, uint256 timestamp)\n    {\n        require(documents[docHash].exists, \"Document not found\");\n        Document storage doc = documents[docHash];\n        return (doc.uploader, doc.metadataURI, doc.timestamp);\n    }\n\n    function isRegistered(bytes32 docHash) external view returns (bool) {\n        return documents[docHash].exists;\n    }\n\n    // ---------------------------------------------------------------------\n    // Owner-only admin functions (access control)\n    // ---------------------------------------------------------------------\n    function revokeDocument(bytes32 docHash) external onlyOwner {\n        require(documents[docHash].exists, \"Document not found\");\n        delete documents[docHash];\n        documentCount -= 1;\n        emit DocumentRevoked(docHash, msg.sender);\n    }\n\n    function transferOwnership(address newOwner) external onlyOwner {\n        require(newOwner != address(0), \"Invalid address\");\n        owner = newOwner;\n    }\n}\n"
+      }
+    }
+  }
+}

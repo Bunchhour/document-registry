@@ -266,7 +266,11 @@ export default function App() {
     setIsConnecting(true);
     setConnectionError(null);
     try {
-      const prov = new BrowserProvider((window as any).ethereum);
+      const prov = new BrowserProvider(
+        (window as any).ethereum,
+        undefined,
+        { cacheTimeout: -1 }
+      );
       await prov.send("eth_requestAccounts", []);
       
       await prov.getNetwork();
@@ -323,7 +327,8 @@ export default function App() {
       const p = provider as BrowserProvider;
       const signer = await p.getSigner();
       const address = await signer.getAddress();
-      const balanceWei = await p.getBalance(address);
+      const balanceHex = await p.send('eth_getBalance', [address, 'latest']);
+      const balanceWei = BigInt(balanceHex);
       setAccounts([{ address, balance: parseFloat(formatEther(balanceWei)).toFixed(4) }]);
     } else {
       await loadAccounts(provider as JsonRpcProvider);
