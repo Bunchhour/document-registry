@@ -18,9 +18,12 @@ A fullstack decentralized application (DApp) for registering and verifying docum
 - **File Drag & Drop Hashing** — drop a file onto the UI to instantly compute its hash without uploading any data
 - **Metadata URI Validation** — the frontend validates that the file at the provided URL matches the local hash before submitting a transaction
 - **Admin Controls** — contract owner can revoke documents or transfer ownership
-- **Live Activity Feed** — real-time event log of all registrations and revocations from the contract
+- **My Entries** — scan indexed events to see active and revoked documents uploaded by the connected wallet
+- **Registry Discovery** — create, import, search, and browse registries through an on-chain factory catalog
+- **Wallet Dashboard** — see the active address, network, precise native-currency balance, and personal registry totals
 - **MetaMask Integration** — connect and sign transactions with MetaMask
 - **Local Hardhat Node** — full support for a local RPC node for development and testing
+- **Centralized Settings** — MetaMask, JSON-RPC, explorer, currency, event scan range, and factory configuration live on one page
 
 ---
 
@@ -43,11 +46,13 @@ A fullstack decentralized application (DApp) for registering and verifying docum
 document-registry/
 ├── contracts/
 │   ├── DocumentRegistry.sol      # Main smart contract
+│   ├── DocumentRegistryFactory.sol # On-chain registry catalog
 │   └── Counter.sol               # Example contract
 ├── frontend/
 │   ├── src/
 │   │   ├── App.tsx               # Main DApp (blockchain UI + auth gate)
 │   │   ├── AuthPage.tsx          # Login / Create Account screen
+│   │   ├── blockchain.ts         # Catalog, event indexing, settings helpers
 │   │   ├── index.css             # Global styles
 │   │   └── contracts/
 │   │       └── DocumentRegistry.json  # Compiled ABI + bytecode
@@ -95,13 +100,13 @@ npx hardhat node
 ```
 This starts a local Ethereum network at `http://127.0.0.1:8545` and prints 20 pre-funded test accounts.
 
-### Step 2 — Deploy the smart contract
+### Step 2 — Deploy the registry catalog
 
 In a second terminal:
 ```bash
-npx hardhat ignition deploy ignition/modules/DocumentRegistry.ts --network localhost
+npx hardhat ignition deploy ignition/modules/DocumentRegistryFactory.ts --network localhost
 ```
-Copy the deployed contract address from the output.
+Copy the factory address from the output. You can also deploy it from the Settings page after connecting an account.
 
 ### Add local test ETH to a MetaMask account
 
@@ -125,10 +130,11 @@ Open **http://localhost:3000** in your browser.
 ### Step 4 — Use the app
 
 1. **Create an account** on the login screen (or sign in if you already have one)
-2. **Connect to the network** — click **Connect MetaMask** or use the local RPC URL (`http://127.0.0.1:8545`)
-3. **Load the contract** — paste the deployed address and click **Load Instance**
-4. **Register a document** — drag and drop a file to hash it, then submit with a metadata URL
-5. **Verify a document** — enter any hash to check if it's registered on-chain
+2. Open **Settings**, choose MetaMask or JSON-RPC, and connect to the network
+3. Enter the deployed factory address and save the network settings
+4. Open **Explore** and create a named registry, or import one you already own
+5. Open the registry to hash, register, verify, browse, revoke, or transfer ownership
+6. Open **My Entries** to see documents uploaded by the active wallet across cataloged registries
 
 ---
 
@@ -147,6 +153,17 @@ Open **http://localhost:3000** in your browser.
 **Events emitted:**
 - `DocumentRegistered(bytes32 indexed docHash, address indexed uploader, uint256 timestamp)`
 - `DocumentRevoked(bytes32 indexed docHash, address indexed revokedBy)`
+
+**Factory:** `DocumentRegistryFactory.sol`
+
+| Function | Type | Description |
+|---|---|---|
+| `createRegistry(string, string)` | write | Deploy and catalog a named registry owned by the caller |
+| `importRegistry(address, string, string)` | write | Catalog a compatible registry owned by the caller |
+| `getRegistries(uint256, uint256)` | read | Return a paginated slice of cataloged registries |
+| `registryCount()` | read | Return the catalog size |
+
+The `DocumentRegistry` constructor now takes an explicit initial-owner address. Previously deployed contracts remain readable and can be imported into a new factory by their current owner.
 
 ---
 
@@ -172,12 +189,12 @@ Open App
   │     └─ Sign In → session saved to localStorage
   │
   └─ Session active → Main DApp
-        ├─ Connect Wallet (MetaMask or local RPC)
-        ├─ Load / Deploy DocumentRegistry contract
-        ├─ Drop file → Keccak-256 hash computed in browser
-        ├─ Register Document on-chain
-        ├─ Verify Document by hash
-        ├─ Admin: Revoke / Transfer Ownership
+        ├─ Settings → connect MetaMask or JSON-RPC
+        ├─ Explore → create, import, and browse registries
+        ├─ Registry → hash, register, verify, and browse documents
+        ├─ My Entries → view uploads by the active wallet
+        ├─ Dashboard → wallet balance and personal summary
+        ├─ Owner controls → revoke / transfer ownership
         └─ Logout → returns to Auth Screen
 ```
 

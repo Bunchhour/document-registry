@@ -5,7 +5,7 @@
   "main": "index.js",
   "scripts": {
     "test": "npx hardhat test",
-    "compile": "npx hardhat compile && node scripts/copy-abi.js",
+    "compile": "npx hardhat build && node scripts/copy-abi.js",
     "fund:local": "node scripts/fund-account.js",
     "ui:install": "npm --prefix frontend install",
     "ui:dev": "npm --prefix frontend run dev",
