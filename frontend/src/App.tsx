@@ -64,6 +64,91 @@ const isHttpUrl = (value: string) => {
   }
 };
 
+type ErrorDetails = {
+  codes: string[];
+  messages: string[];
+};
+
+const extractErrorDetails = (error: unknown): ErrorDetails => {
+  const details: ErrorDetails = { codes: [], messages: [] };
+  const queue: unknown[] = [error];
+  const visited = new Set<object>();
+
+  while (queue.length > 0 && visited.size < 12) {
+    const current = queue.shift();
+
+    if (typeof current === 'string') {
+      details.messages.push(current);
+      continue;
+    }
+
+    if (typeof current !== 'object' || current === null || visited.has(current)) {
+      continue;
+    }
+
+    visited.add(current);
+    const value = current as Record<string, unknown>;
+
+    if (typeof value.code === 'string' || typeof value.code === 'number') {
+      details.codes.push(String(value.code).toUpperCase());
+    }
+
+    for (const key of ['shortMessage', 'reason', 'message']) {
+      if (typeof value[key] === 'string') {
+        details.messages.push(value[key]);
+      }
+    }
+
+    for (const key of ['error', 'info', 'data', 'cause']) {
+      if (value[key] !== undefined) {
+        queue.push(value[key]);
+      }
+    }
+  }
+
+  return details;
+};
+
+const getFriendlyTransactionError = (error: unknown, fallback: string) => {
+  const { codes, messages } = extractErrorDetails(error);
+  const combinedMessage = messages.join(' ').toLowerCase();
+
+  if (
+    codes.includes('4001') ||
+    codes.includes('ACTION_REJECTED') ||
+    /user (?:rejected|denied)|request rejected|ethers-user-denied/.test(combinedMessage)
+  ) {
+    return 'Transaction cancelled in MetaMask. No changes were made.';
+  }
+
+  if (
+    codes.includes('INSUFFICIENT_FUNDS') ||
+    /insufficient (?:funds|balance)|funds for gas|exceeds (?:the )?balance/.test(combinedMessage)
+  ) {
+    return 'Insufficient ETH to pay the network fee. Add ETH to this account on the selected network and try again.';
+  }
+
+  if (
+    codes.includes('NETWORK_ERROR') ||
+    codes.includes('SERVER_ERROR') ||
+    /failed to fetch|could not connect|network error/.test(combinedMessage)
+  ) {
+    return 'Could not reach the selected blockchain network. Check the network in MetaMask and try again.';
+  }
+
+  const readableMessage = messages
+    .map((message) => message
+      .replace(/\s*\((?:action|operation|reason|info|error|payload|transaction|code)=.*$/s, '')
+      .trim())
+    .find((message) =>
+      message.length > 0 &&
+      message.length <= 180 &&
+      !/^(could not coalesce|missing revert data|unknown error|internal json-rpc error)/i.test(message)
+    );
+
+  return readableMessage || fallback;
+};
+
 export default function App() {
   // ── Auth state ────────────────────────────────────────────────────────────
   const [currentUser, setCurrentUser] = useState<string | null>(() => {
@@ -316,6 +401,13 @@ export default function App() {
     setContractError(null);
     try {
       const signer = await getActiveSigner();
+      const signerAddress = await signer.getAddress();
+      const signerBalance = await provider.getBalance(signerAddress);
+
+      if (signerBalance === 0n) {
+        throw new Error('Insufficient balance: this account has no ETH to pay the deployment fee.');
+      }
+
       const factory = new ethers.ContractFactory(abi, bytecode, signer);
       
       const deployed = await factory.deploy();
@@ -331,9 +423,12 @@ export default function App() {
       
       // Refresh balances
       await refreshBalances();
-    } catch (err: any) {
+    } catch (err: unknown) {
       console.error(err);
-      setContractError(err.message || 'Deployment failed');
+      setContractError(getFriendlyTransactionError(
+        err,
+        'Deployment failed. Check your wallet balance and selected network, then try again.'
+      ));
     } finally {
       setIsDeploying(false);
     }
@@ -597,9 +692,9 @@ export default function App() {
       setRegisterSuccess(`Registered successfully! Tx: ${receipt.hash}`);
       fetchContractStats(contract);
       refreshBalances();
-    } catch (err: any) {
+    } catch (err: unknown) {
       console.error(err);
-      setRegisterError(err.reason || err.message || 'Transaction reverted');
+      setRegisterError(getFriendlyTransactionError(err, 'Document registration failed. Please try again.'));
     } finally {
       setIsRegistering(false);
     }
@@ -656,9 +751,9 @@ export default function App() {
       setRevokeHash('');
       fetchContractStats(contract);
       refreshBalances();
-    } catch (err: any) {
+    } catch (err: unknown) {
       console.error(err);
-      setRevokeError(err.reason || err.message || 'Revocation failed');
+      setRevokeError(getFriendlyTransactionError(err, 'Document revocation failed. Please try again.'));
     } finally {
       setIsRevoking(false);
     }
@@ -682,9 +777,9 @@ export default function App() {
       setNewOwnerAddress('');
       fetchContractStats(contract);
       refreshBalances();
-    } catch (err: any) {
+    } catch (err: unknown) {
       console.error(err);
-      setTransferError(err.reason || err.message || 'Ownership transfer failed');
+      setTransferError(getFriendlyTransactionError(err, 'Ownership transfer failed. Please try again.'));
     } finally {
       setIsTransferring(false);
     }
