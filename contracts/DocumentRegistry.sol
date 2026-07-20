@@ -34,8 +34,9 @@ contract DocumentRegistry {
         _;
     }
 
-    constructor() {
-        owner = msg.sender;
+    constructor(address initialOwner) {
+        require(initialOwner != address(0), "Invalid owner");
+        owner = initialOwner;
     }
 
     // ---------------------------------------------------------------------

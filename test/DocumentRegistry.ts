@@ -6,13 +6,19 @@ const { ethers, networkHelpers } = await network.create();
 describe("DocumentRegistry", function () {
   async function deployRegistryFixture() {
     const [owner, other] = await ethers.getSigners();
-    const registry = await ethers.deployContract("DocumentRegistry");
+    const registry = await ethers.deployContract("DocumentRegistry", [owner.address]);
     return { registry, owner, other };
   }
 
-  it("sets the deployer as owner", async function () {
+  it("sets the configured initial owner", async function () {
     const { registry, owner } = await networkHelpers.loadFixture(deployRegistryFixture);
     expect(await registry.owner()).to.equal(owner.address);
+  });
+
+  it("rejects a zero initial owner", async function () {
+    await expect(
+      ethers.deployContract("DocumentRegistry", [ethers.ZeroAddress]),
+    ).to.be.revertedWith("Invalid owner");
   });
 
   it("registers a document and stores its metadata", async function () {

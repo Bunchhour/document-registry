@@ -1,59 +1,61 @@
-import React, { useState, useEffect } from 'react';
-import { 
-  ethers, 
-  JsonRpcProvider, 
+import React, { useEffect, useMemo, useState } from 'react';
+import {
   BrowserProvider,
-  Contract, 
-  Wallet,
-  formatEther
+  Contract,
+  ContractFactory,
+  JsonRpcProvider,
+  ethers,
+  formatEther,
+  isAddress,
+  type Provider,
+  type Signer,
 } from 'ethers';
-import { 
-  Upload, 
-  FileText, 
-  CheckCircle, 
-  AlertTriangle, 
-  Activity, 
-  Plus, 
-  Layers, 
-  User, 
-  Cpu, 
-  Clipboard, 
-  Trash2, 
-  Shield, 
-  RotateCw,
-  Search,
-  ArrowRightLeft,
-  LogOut
+import {
+  Activity, AlertTriangle, ArrowRightLeft, CheckCircle, Clipboard, Compass,
+  ExternalLink, FileCheck2, FileText, Gauge, Layers, LogOut, Plus, RefreshCw,
+  Search, Settings, Shield, Trash2, Upload, UserRound, WalletCards,
 } from 'lucide-react';
-import DocumentRegistryArtifact from './contracts/DocumentRegistry.json';
 import AuthPage from './AuthPage';
+import {
+  DEFAULT_SETTINGS,
+  explorerLink,
+  factoryAbi,
+  factoryBytecode,
+  formatNativeBalance,
+  loadRegistryCatalog,
+  loadRegistryEntries,
+  loadSettings,
+  registryAbi,
+  registryBytecode,
+  saveSettings,
+  shortAddress,
+  type NetworkSettings,
+  type RegistryEntry,
+  type RegistrySummary,
+} from './blockchain';
 
-// Destructure from the compiled artifact
-const { abi, bytecode } = DocumentRegistryArtifact;
-
-// Session storage key
 const SESSION_KEY = 'docregistry_session';
+type Page = 'dashboard' | 'entries' | 'explore' | 'registry' | 'settings';
+type ProviderState = JsonRpcProvider | BrowserProvider;
 
-interface Account {
+interface AccountState {
   address: string;
   balance: string;
 }
 
-interface EventLog {
-  type: 'registered' | 'revoked';
-  docHash: string;
-  actor: string; // uploader or revoker
-  timestamp: string;
-  blockNumber: number;
-  txHash: string;
+interface LookupResult {
+  exists: boolean;
+  uploader?: string;
+  metadataURI?: string;
+  timestamp?: number;
 }
 
-interface UriValidationResponse {
-  ok: boolean;
-  hash: string;
-  byteLength: number;
-  error?: string;
-}
+const errorMessage = (error: unknown, fallback: string) => {
+  const value = error as { code?: string | number; shortMessage?: string; reason?: string; message?: string };
+  if (value?.code === 4001 || value?.code === 'ACTION_REJECTED') return 'The wallet request was cancelled.';
+  if (value?.code === 'INSUFFICIENT_FUNDS') return 'This account does not have enough funds for the network fee.';
+  return value?.shortMessage || value?.reason || value?.message || fallback;
+};
 
 const isHttpUrl = (value: string) => {
   try {
@@ -64,1367 +66,653 @@ const isHttpUrl = (value: string) => {
   }
 };
 
-type ErrorDetails = {
-  codes: string[];
-  messages: string[];
-};
-
-const extractErrorDetails = (error: unknown): ErrorDetails => {
-  const details: ErrorDetails = { codes: [], messages: [] };
-  const queue: unknown[] = [error];
-  const visited = new Set<object>();
-
-  while (queue.length > 0 && visited.size < 12) {
-    const current = queue.shift();
-
-    if (typeof current === 'string') {
-      details.messages.push(current);
-      continue;
-    }
-
-    if (typeof current !== 'object' || current === null || visited.has(current)) {
-      continue;
-    }
-
-    visited.add(current);
-    const value = current as Record<string, unknown>;
-
-    if (typeof value.code === 'string' || typeof value.code === 'number') {
-      details.codes.push(String(value.code).toUpperCase());
-    }
-
-    for (const key of ['shortMessage', 'reason', 'message']) {
-      if (typeof value[key] === 'string') {
-        details.messages.push(value[key]);
-      }
-    }
-
-    for (const key of ['error', 'info', 'data', 'cause']) {
-      if (value[key] !== undefined) {
-        queue.push(value[key]);
-      }
-    }
-  }
-
-  return details;
-};
-
-const getFriendlyTransactionError = (error: unknown, fallback: string) => {
-  const { codes, messages } = extractErrorDetails(error);
-  const combinedMessage = messages.join(' ').toLowerCase();
-
-  if (
-    codes.includes('4001') ||
-    codes.includes('ACTION_REJECTED') ||
-    /user (?:rejected|denied)|request rejected|ethers-user-denied/.test(combinedMessage)
-  ) {
-    return 'Transaction cancelled in MetaMask. No changes were made.';
-  }
-
-  if (
-    codes.includes('INSUFFICIENT_FUNDS') ||
-    /insufficient (?:funds|balance)|funds for gas|exceeds (?:the )?balance/.test(combinedMessage)
-  ) {
-    return 'Insufficient ETH to pay the network fee. Add ETH to this account on the selected network and try again.';
-  }
-
-  if (
-    codes.includes('NETWORK_ERROR') ||
-    codes.includes('SERVER_ERROR') ||
-    /failed to fetch|could not connect|network error/.test(combinedMessage)
-  ) {
-    return 'Could not reach the selected blockchain network. Check the network in MetaMask and try again.';
-  }
-
-  const readableMessage = messages
-    .map((message) => message
-      .replace(/\s*\((?:action|operation|reason|info|error|payload|transaction|code)=.*$/s, '')
-      .trim())
-    .find((message) =>
-      message.length > 0 &&
-      message.length <= 180 &&
-      !/^(could not coalesce|missing revert data|unknown error|internal json-rpc error)/i.test(message)
-    );
-
-  return readableMessage || fallback;
-};
-
 export default function App() {
-  // ── Auth state ────────────────────────────────────────────────────────────
-  const [currentUser, setCurrentUser] = useState<string | null>(() => {
-    return localStorage.getItem(SESSION_KEY);
-  });
-
-  const handleAuthSuccess = (username: string) => {
-    localStorage.setItem(SESSION_KEY, username);
-    setCurrentUser(username);
-  };
-
-  const handleLogout = () => {
-    localStorage.removeItem(SESSION_KEY);
-    setCurrentUser(null);
-  };
-
-  // ── Connection states ─────────────────────────────────────────────────────
-  const [rpcUrl, setRpcUrl] = useState('http://127.0.0.1:8545');
-  const [provider, setProvider] = useState<JsonRpcProvider | BrowserProvider | null>(null);
-  const [useMetaMask, setUseMetaMask] = useState(false);
-  const [isConnected, setIsConnected] = useState(false);
-  const [connectionError, setConnectionError] = useState<string | null>(null);
+  const [currentUser, setCurrentUser] = useState<string | null>(() => localStorage.getItem(SESSION_KEY));
+  const [page, setPage] = useState<Page>('dashboard');
+  const [settings, setSettings] = useState<NetworkSettings>(loadSettings);
+  const [provider, setProvider] = useState<ProviderState | null>(null);
+  const [networkName, setNetworkName] = useState('');
+  const [chainId, setChainId] = useState<bigint | null>(null);
+  const [accounts, setAccounts] = useState<AccountState[]>([]);
+  const [selectedAddress, setSelectedAddress] = useState('');
+  const [connectionMode, setConnectionMode] = useState<'metamask' | 'rpc' | null>(null);
   const [isConnecting, setIsConnecting] = useState(false);
+  const [connectionError, setConnectionError] = useState('');
+  const [balanceUpdatedAt, setBalanceUpdatedAt] = useState<Date | null>(null);
 
-  // Contract states
-  const [contractAddress, setContractAddress] = useState('');
-  const [contract, setContract] = useState<Contract | null>(null);
-  const [owner, setOwner] = useState<string>('');
-  const [documentCount, setDocumentCount] = useState<number | null>(null);
-  const [isDeploying, setIsDeploying] = useState(false);
-  const [contractError, setContractError] = useState<string | null>(null);
+  const [catalog, setCatalog] = useState<RegistrySummary[]>([]);
+  const [catalogLoading, setCatalogLoading] = useState(false);
+  const [catalogError, setCatalogError] = useState('');
+  const [registryAddressInput, setRegistryAddressInput] = useState('');
+  const [registryAddress, setRegistryAddress] = useState('');
+  const [registryName, setRegistryName] = useState('Uncatalogued registry');
+  const [registryOwner, setRegistryOwner] = useState('');
+  const [documentCount, setDocumentCount] = useState(0);
+  const [registryEntries, setRegistryEntries] = useState<RegistryEntry[]>([]);
+  const [entriesLoading, setEntriesLoading] = useState(false);
+  const [workspaceError, setWorkspaceError] = useState('');
+  const [myEntries, setMyEntries] = useState<RegistryEntry[]>([]);
+  const [myEntriesLoading, setMyEntriesLoading] = useState(false);
+  const [search, setSearch] = useState('');
 
-  // Wallet/Signer states
-  const [accounts, setAccounts] = useState<Account[]>([]);
-  const [selectedAddress, setSelectedAddress] = useState<string | null>(null);
-  const [customPrivateKey, setCustomPrivateKey] = useState('');
-  const [customWallet, setCustomWallet] = useState<Wallet | null>(null);
-  const [isUsingCustomWallet, setIsUsingCustomWallet] = useState(false);
+  const [registryForm, setRegistryForm] = useState({ name: '', metadataURI: '' });
+  const [importAddress, setImportAddress] = useState('');
+  const [actionStatus, setActionStatus] = useState('');
+  const [actionError, setActionError] = useState('');
+  const [isWorking, setIsWorking] = useState(false);
 
-  // Drag & drop file hashing states
-  const [isDragging, setIsDragging] = useState(false);
-  const [fileName, setFileName] = useState<string | null>(null);
-  const [fileSize, setFileSize] = useState<string | null>(null);
-  const [computedHash, setComputedHash] = useState<string>('');
-  const [isHashing, setIsHashing] = useState(false);
-
-  // Operation states
+  const [fileName, setFileName] = useState('');
+  const [fileSize, setFileSize] = useState('');
+  const [documentHash, setDocumentHash] = useState('');
   const [metadataURI, setMetadataURI] = useState('https://');
-  const [registerHash, setRegisterHash] = useState('');
-  const [isRegistering, setIsRegistering] = useState(false);
-  const [registerSuccess, setRegisterSuccess] = useState<string | null>(null);
-  const [registerError, setRegisterError] = useState<string | null>(null);
-
   const [lookupHash, setLookupHash] = useState('');
-  const [isLookingUp, setIsLookingUp] = useState(false);
-  const [lookupResult, setLookupResult] = useState<{
-    searched: boolean;
-    exists: boolean;
-    uploader?: string;
-    metadataURI?: string;
-    timestamp?: string;
-  } | null>(null);
-  const [lookupError, setLookupError] = useState<string | null>(null);
+  const [lookup, setLookup] = useState<LookupResult | null>(null);
+  const [newOwner, setNewOwner] = useState('');
 
-  const [revokeHash, setRevokeHash] = useState('');
-  const [isRevoking, setIsRevoking] = useState(false);
-  const [revokeSuccess, setRevokeSuccess] = useState<string | null>(null);
-  const [revokeError, setRevokeError] = useState<string | null>(null);
+  const connected = provider !== null && chainId !== null;
+  const selectedAccount = accounts.find((account) => account.address.toLowerCase() === selectedAddress.toLowerCase());
+  const currentRegistry = catalog.find((item) => item.address.toLowerCase() === registryAddress.toLowerCase());
+  const isRegistryOwner = !!selectedAddress && selectedAddress.toLowerCase() === registryOwner.toLowerCase();
 
-  const [newOwnerAddress, setNewOwnerAddress] = useState('');
-  const [isTransferring, setIsTransferring] = useState(false);
-  const [transferSuccess, setTransferSuccess] = useState<string | null>(null);
-  const [transferError, setTransferError] = useState<string | null>(null);
+  const visibleRegistryEntries = useMemo(() => {
+    const query = search.trim().toLowerCase();
+    return registryEntries.filter((entry) => !query || [entry.hash, entry.uploader, entry.metadataURI]
+      .some((value) => value.toLowerCase().includes(query)));
+  }, [registryEntries, search]);
 
-  // Live Activity Feed
-  const [events, setEvents] = useState<EventLog[]>([]);
-  const [copyFeedback, setCopyFeedback] = useState<string | null>(null);
+  const visibleMyEntries = useMemo(() => {
+    const query = search.trim().toLowerCase();
+    return myEntries.filter((entry) => !query || [entry.hash, entry.metadataURI, entry.registryName]
+      .some((value) => value.toLowerCase().includes(query)));
+  }, [myEntries, search]);
 
-  // Automatically attempt initial connection
-  useEffect(() => {
-    connectToNode();
-  }, []);
+  const disconnect = (message = '') => {
+    setProvider(null);
+    setAccounts([]);
+    setSelectedAddress('');
+    setNetworkName('');
+    setChainId(null);
+    setConnectionMode(null);
+    setRegistryAddress('');
+    setRegistryEntries([]);
+    setCatalog([]);
+    if (message) setConnectionError(message);
+  };
 
-  // Connect to JSON-RPC node
-  const connectToNode = async (targetUrl = rpcUrl) => {
+  const hydrateConnection = async (nextProvider: ProviderState, mode: 'metamask' | 'rpc') => {
+    const network = await nextProvider.getNetwork();
+    let nextAccounts: AccountState[] = [];
+    if (mode === 'metamask') {
+      const signer = await (nextProvider as BrowserProvider).getSigner();
+      const address = await signer.getAddress();
+      nextAccounts = [{ address, balance: formatEther(await nextProvider.getBalance(address)) }];
+    } else {
+      const signers = await (nextProvider as JsonRpcProvider).listAccounts();
+      nextAccounts = await Promise.all(signers.map(async (signer) => {
+        const address = await signer.getAddress();
+        return { address, balance: formatEther(await nextProvider.getBalance(address)) };
+      }));
+    }
+    setProvider(nextProvider);
+    setConnectionMode(mode);
+    setNetworkName(network.name === 'unknown' ? `Chain ${network.chainId}` : network.name);
+    setChainId(network.chainId);
+    setAccounts(nextAccounts);
+    setSelectedAddress(nextAccounts[0]?.address ?? '');
+    setBalanceUpdatedAt(new Date());
+    setConnectionError('');
+  };
+
+  const connectRpc = async () => {
     setIsConnecting(true);
-    setConnectionError(null);
+    setConnectionError('');
     try {
-      const prov = new JsonRpcProvider(targetUrl);
-      
-      // Test the network connection
-      await prov.getNetwork();
-      setProvider(prov);
-      setIsConnected(true);
-      setUseMetaMask(false);
-      
-      // Load accounts
-      await loadAccounts(prov);
-    } catch (err: any) {
-      console.error(err);
-      setIsConnected(false);
-      setConnectionError(err.message || 'Failed to connect to JSON-RPC node');
-      setAccounts([]);
-      setSelectedAddress(null);
+      const nextProvider = new JsonRpcProvider(settings.rpcUrl);
+      await hydrateConnection(nextProvider, 'rpc');
+    } catch (error) {
+      disconnect(errorMessage(error, 'Could not connect to the JSON-RPC endpoint.'));
     } finally {
       setIsConnecting(false);
     }
   };
 
   const connectMetaMask = async () => {
-    if (!(window as any).ethereum) {
-      alert("MetaMask is not installed!");
+    const ethereum = (window as any).ethereum;
+    if (!ethereum) {
+      setConnectionError('MetaMask is not installed in this browser.');
       return;
     }
     setIsConnecting(true);
-    setConnectionError(null);
+    setConnectionError('');
     try {
-      const prov = new BrowserProvider(
-        (window as any).ethereum,
-        undefined,
-        { cacheTimeout: -1 }
-      );
-      await prov.send("eth_requestAccounts", []);
-      
-      await prov.getNetwork();
-      setProvider(prov);
-      setIsConnected(true);
-      setUseMetaMask(true);
-      
-      const signer = await prov.getSigner();
-      const address = await signer.getAddress();
-      const balanceWei = await prov.getBalance(address);
-      
-      setAccounts([{ address, balance: parseFloat(formatEther(balanceWei)).toFixed(4) }]);
-      setSelectedAddress(address);
-      setIsUsingCustomWallet(false);
-    } catch (err: any) {
-      console.error(err);
-      setIsConnected(false);
-      setConnectionError(err.message || 'Failed to connect to MetaMask');
-      setAccounts([]);
-      setSelectedAddress(null);
+      await ethereum.request({ method: 'eth_requestAccounts' });
+      await hydrateConnection(new BrowserProvider(ethereum, undefined, { cacheTimeout: -1 }), 'metamask');
+    } catch (error) {
+      setConnectionError(errorMessage(error, 'Could not connect to MetaMask.'));
     } finally {
       setIsConnecting(false);
     }
   };
 
-  // Fetch accounts from the local node
-  const loadAccounts = async (prov: JsonRpcProvider) => {
-    try {
-      const signers = await prov.listAccounts();
-      const loaded: Account[] = await Promise.all(
-        signers.map(async (signer) => {
-          const address = await signer.getAddress();
-          const balanceWei = await prov.getBalance(address);
-          const balanceEth = formatEther(balanceWei);
-          return {
-            address,
-            balance: parseFloat(balanceEth).toFixed(4)
-          };
-        })
-      );
-      setAccounts(loaded);
-      if (loaded.length > 0 && !selectedAddress) {
-        setSelectedAddress(loaded[0].address);
-      }
-    } catch (err) {
-      console.error('Error fetching accounts:', err);
-    }
-  };
-
-  // Refresh account balances
   const refreshBalances = async () => {
     if (!provider) return;
-    if (useMetaMask) {
-      const p = provider as BrowserProvider;
-      const signer = await p.getSigner();
-      const address = await signer.getAddress();
-      const balanceHex = await p.send('eth_getBalance', [address, 'latest']);
-      const balanceWei = BigInt(balanceHex);
-      setAccounts([{ address, balance: parseFloat(formatEther(balanceWei)).toFixed(4) }]);
-    } else {
-      await loadAccounts(provider as JsonRpcProvider);
-    }
+    const refreshed = await Promise.all(accounts.map(async (account) => ({
+      ...account,
+      balance: formatEther(await provider.getBalance(account.address)),
+    })));
+    setAccounts(refreshed);
+    setBalanceUpdatedAt(new Date());
   };
 
-  // Switch to custom wallet using private key
-  const handleApplyCustomPrivateKey = () => {
-    if (!provider || !customPrivateKey) return;
-    try {
-      // Validate key length
-      let cleanKey = customPrivateKey.trim();
-      if (!cleanKey.startsWith('0x')) {
-        cleanKey = '0x' + cleanKey;
-      }
-      const wallet = new Wallet(cleanKey, provider);
-      setCustomWallet(wallet);
-      setIsUsingCustomWallet(true);
-      setSelectedAddress(wallet.address);
-      setCustomPrivateKey('');
-    } catch (err: any) {
-      alert('Invalid private key format: ' + err.message);
-    }
-  };
-
-  // Switch back to pre-funded node accounts
-  const handleUseNodeAccounts = () => {
-    setIsUsingCustomWallet(false);
-    setCustomWallet(null);
-    if (accounts.length > 0) {
-      setSelectedAddress(accounts[0].address);
-    }
-  };
-
-  // Get current active signer
-  const getActiveSigner = async () => {
-    if (!provider) throw new Error('No provider connected');
-    if (useMetaMask) {
-      return await (provider as BrowserProvider).getSigner();
-    }
-    if (isUsingCustomWallet && customWallet) {
-      return customWallet;
-    }
-    if (!selectedAddress) throw new Error('No signer selected');
-    return await (provider as JsonRpcProvider).getSigner(selectedAddress);
-  };
-
-  // Load contract details from address input
-  const handleLoadContract = async (addr = contractAddress) => {
-    if (!provider || !addr) return;
-    setContractError(null);
-    try {
-      const cleanAddr = addr.trim();
-      const code = await provider.getCode(cleanAddr);
-      if (code === '0x' || code === '0x00') {
-        throw new Error('No contract code found at this address');
-      }
-      
-      const newContract = new Contract(cleanAddr, abi, provider);
-      setContract(newContract);
-      setContractAddress(cleanAddr);
-      await fetchContractStats(newContract);
-      setupEventListeners(newContract);
-    } catch (err: any) {
-      console.error(err);
-      setContractError(err.message || 'Failed to load contract');
-      setContract(null);
-    }
-  };
-
-  // Deploy a new contract instance directly
-  const handleDeployContract = async () => {
-    if (!provider) return;
-    setIsDeploying(true);
-    setContractError(null);
-    try {
-      const signer = await getActiveSigner();
-      const signerAddress = await signer.getAddress();
-      const signerBalance = await provider.getBalance(signerAddress);
-
-      if (signerBalance === 0n) {
-        throw new Error('Insufficient balance: this account has no ETH to pay the deployment fee.');
-      }
-
-      const factory = new ethers.ContractFactory(abi, bytecode, signer);
-      
-      const deployed = await factory.deploy();
-      await deployed.waitForDeployment();
-      
-      const addr = await deployed.getAddress();
-      setContractAddress(addr);
-      
-      const newContract = new Contract(addr, abi, provider);
-      setContract(newContract);
-      await fetchContractStats(newContract);
-      setupEventListeners(newContract);
-      
-      // Refresh balances
-      await refreshBalances();
-    } catch (err: unknown) {
-      console.error(err);
-      setContractError(getFriendlyTransactionError(
-        err,
-        'Deployment failed. Check your wallet balance and selected network, then try again.'
-      ));
-    } finally {
-      setIsDeploying(false);
-    }
-  };
-
-  // Fetch stats from loaded contract
-  const fetchContractStats = async (cInstance: Contract) => {
-    try {
-      const cOwner = await cInstance.owner();
-      const cCount = await cInstance.documentCount();
-      setOwner(cOwner);
-      setDocumentCount(Number(cCount));
-    } catch (err) {
-      console.error('Error fetching contract stats:', err);
-    }
-  };
-
-  // Setup contract event listeners
-  const setupEventListeners = async (cInstance: Contract) => {
-    if (!provider) return;
-    // Clear old listeners first
-    cInstance.removeAllListeners();
-
-    try {
-      // Query past events
-      const regFilter = cInstance.filters.DocumentRegistered();
-      const revFilter = cInstance.filters.DocumentRevoked();
-      
-      const [regEvents, revEvents] = await Promise.all([
-        cInstance.queryFilter(regFilter, 0, 'latest'),
-        cInstance.queryFilter(revFilter, 0, 'latest')
-      ]);
-
-      const formattedEvents: EventLog[] = [];
-      
-      for (const e of regEvents) {
-        if ('args' in e && e.args) {
-          formattedEvents.push({
-            type: 'registered',
-            docHash: e.args[0] as string,
-            actor: e.args[1] as string,
-            timestamp: new Date(Number(e.args[2]) * 1000).toLocaleString(),
-            blockNumber: e.blockNumber,
-            txHash: e.transactionHash
-          });
-        }
-      }
-
-      for (const e of revEvents) {
-        if ('args' in e && e.args) {
-          formattedEvents.push({
-            type: 'revoked',
-            docHash: e.args[0] as string,
-            actor: e.args[1] as string,
-            timestamp: 'N/A', // Revoked doesn't emit block timestamp
-            blockNumber: e.blockNumber,
-            txHash: e.transactionHash
-          });
-        }
-      }
-
-      // Sort by block number descending
-      formattedEvents.sort((a, b) => b.blockNumber - a.blockNumber);
-      setEvents(formattedEvents);
-
-      // Add real-time listeners
-      cInstance.on(regFilter, (...args: any[]) => {
-        let docHash = '';
-        let uploader = '';
-        let timestamp: any = 0;
-        let blockNumber = 0;
-        let txHash = '';
-
-        if (args.length === 1 && args[0] && typeof args[0] === 'object' && 'log' in args[0]) {
-          const payload = args[0];
-          if (payload.args) [docHash, uploader, timestamp] = payload.args;
-          if (payload.log) {
-            blockNumber = payload.log.blockNumber;
-            txHash = payload.log.transactionHash;
-          }
-        } else {
-          docHash = args[0];
-          uploader = args[1];
-          timestamp = args[2];
-          const payload = args[args.length - 1];
-          blockNumber = payload?.log?.blockNumber || payload?.blockNumber || 0;
-          txHash = payload?.log?.transactionHash || payload?.transactionHash || '';
-        }
-
-        setEvents((prev) => [
-          {
-            type: 'registered',
-            docHash,
-            actor: uploader,
-            timestamp: new Date(Number(timestamp) * 1000).toLocaleString(),
-            blockNumber,
-            txHash
-          },
-          ...prev
-        ]);
-        fetchContractStats(cInstance);
-        refreshBalances();
-      });
-
-      cInstance.on(revFilter, (...args: any[]) => {
-        let docHash = '';
-        let revokedBy = '';
-        let blockNumber = 0;
-        let txHash = '';
-
-        if (args.length === 1 && args[0] && typeof args[0] === 'object' && 'log' in args[0]) {
-          const payload = args[0];
-          if (payload.args) [docHash, revokedBy] = payload.args;
-          if (payload.log) {
-            blockNumber = payload.log.blockNumber;
-            txHash = payload.log.transactionHash;
-          }
-        } else {
-          docHash = args[0];
-          revokedBy = args[1];
-          const payload = args[args.length - 1];
-          blockNumber = payload?.log?.blockNumber || payload?.blockNumber || 0;
-          txHash = payload?.log?.transactionHash || payload?.transactionHash || '';
-        }
-
-        setEvents((prev) => [
-          {
-            type: 'revoked',
-            docHash,
-            actor: revokedBy,
-            timestamp: 'N/A',
-            blockNumber,
-            txHash
-          },
-          ...prev
-        ]);
-        fetchContractStats(cInstance);
-        refreshBalances();
-      });
-
-    } catch (err) {
-      console.error('Error fetching/setting up events:', err);
-    }
-  };
-
-  // Compute file Keccak-256 hash client-side
-  const handleFileDrop = (e: React.DragEvent<HTMLDivElement>) => {
-    e.preventDefault();
-    setIsDragging(false);
-    
-    if (e.dataTransfer.files && e.dataTransfer.files[0]) {
-      processFile(e.dataTransfer.files[0]);
-    }
-  };
-
-  const handleFileInput = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files && e.target.files[0]) {
-      processFile(e.target.files[0]);
-    }
-  };
-
-  const processFile = (file: File) => {
-    setFileName(file.name);
-    // Format size
-    const sizeInMB = file.size / (1024 * 1024);
-    setFileSize(sizeInMB < 0.1 ? `${(file.size / 1024).toFixed(1)} KB` : `${sizeInMB.toFixed(2)} MB`);
-    setIsHashing(true);
-
-    const reader = new FileReader();
-    reader.onload = async (event) => {
-      try {
-        const buffer = event.target?.result as ArrayBuffer;
-        const uint8Array = new Uint8Array(buffer);
-        // Ethers keccak256 requires BytesLike
-        const hash = ethers.keccak256(uint8Array);
-        setComputedHash(hash);
-        // Pre-fill input fields
-        setRegisterHash(hash);
-        setLookupHash(hash);
-      } catch (err) {
-        console.error('Hashing error:', err);
-      } finally {
-        setIsHashing(false);
+  useEffect(() => {
+    const ethereum = (window as any).ethereum;
+    if (!ethereum?.on || connectionMode !== 'metamask') return;
+    const onAccountsChanged = (next: string[]) => {
+      if (!next.length) disconnect('MetaMask disconnected the active account.');
+      else {
+        setSelectedAddress(next[0]);
+        if (provider) provider.getBalance(next[0]).then((balance) => {
+          setAccounts([{ address: next[0], balance: formatEther(balance) }]);
+          setBalanceUpdatedAt(new Date());
+        });
       }
     };
-    reader.readAsArrayBuffer(file);
-  };
+    const onChainChanged = () => disconnect('The wallet network changed. Reconnect from Settings.');
+    ethereum.on('accountsChanged', onAccountsChanged);
+    ethereum.on('chainChanged', onChainChanged);
+    return () => {
+      ethereum.removeListener('accountsChanged', onAccountsChanged);
+      ethereum.removeListener('chainChanged', onChainChanged);
+    };
+  }, [connectionMode, provider]);
 
-  const validateFetchedBytes = (bytes: Uint8Array, expectedHash: string) => {
-    const fetchedHash = ethers.keccak256(bytes);
-
-    if (fetchedHash.toLowerCase() !== expectedHash.toLowerCase()) {
-      throw new Error("Validation Failed: The hash of the file at the provided URI does not match the uploaded file's hash.");
-    }
-  };
-
-  const validateUriInBrowser = async (uri: string, expectedHash: string) => {
-    const response = await fetch(uri);
-
-    if (!response.ok) {
-      throw new Error(`Failed to fetch URI: ${response.statusText || response.status}`);
-    }
-
-    const buffer = await response.arrayBuffer();
-    validateFetchedBytes(new Uint8Array(buffer), expectedHash);
-  };
-
-  const validateUriOnServer = async (uri: string, expectedHash: string) => {
-    const response = await fetch('/api/validate-uri', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ uri, expectedHash })
-    });
-    const result = await response.json() as UriValidationResponse;
-
-    if (!response.ok) {
-      throw new Error(result.error || 'Server-side URI validation failed');
-    }
-
-    if (!result.ok) {
-      throw new Error(`Validation Failed: The hash of the file at the provided URI is ${result.hash}, which does not match the uploaded file's hash.`);
-    }
-  };
-
-  const validateMetadataUri = async (uri: string, expectedHash: string) => {
-    if (!isHttpUrl(uri)) {
-      throw new Error("Validation Failed: URI must be a valid http or https direct file link.");
-    }
-
-    try {
-      await validateUriInBrowser(uri, expectedHash);
-    } catch (browserErr) {
-      try {
-        await validateUriOnServer(uri, expectedHash);
-      } catch (serverErr: any) {
-        const browserMessage = browserErr instanceof Error ? browserErr.message : 'Browser validation failed';
-        throw new Error("Link Validation Error: Could not fetch and validate the file from the URI. " +
-          `${serverErr.message || browserMessage} Browser validation said: ${browserMessage}`);
+  useEffect(() => {
+    if (!provider) return;
+    let lastRefresh = 0;
+    const onBlock = () => {
+      const now = Date.now();
+      if (now - lastRefresh > 12_000) {
+        lastRefresh = now;
+        refreshBalances().catch(() => undefined);
       }
-    }
+    };
+    provider.on('block', onBlock);
+    return () => { provider.off('block', onBlock); };
+  }, [provider, accounts.map((account) => account.address).join(',')]);
+
+  const getSigner = async (): Promise<Signer> => {
+    if (!provider || !selectedAddress) throw new Error('Connect and select a wallet first.');
+    return connectionMode === 'metamask'
+      ? (provider as BrowserProvider).getSigner()
+      : (provider as JsonRpcProvider).getSigner(selectedAddress);
   };
 
-  // Actions
-  const handleRegisterDocument = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!contract) return;
-    setIsRegistering(true);
-    setRegisterSuccess(null);
-    setRegisterError(null);
-
+  const refreshCatalog = async (targetProvider: Provider | null = provider) => {
+    if (!targetProvider || !settings.factoryAddress) {
+      setCatalog([]);
+      return;
+    }
+    setCatalogLoading(true);
+    setCatalogError('');
     try {
-      // 1. Link Validation
-      await validateMetadataUri(metadataURI.trim(), registerHash.trim());
-
-      const signer = await getActiveSigner();
-      const contractWithSigner = contract.connect(signer) as Contract;
-      
-      const tx = await contractWithSigner.registerDocument(registerHash, metadataURI);
-      const receipt = await tx.wait();
-      
-      setRegisterSuccess(`Registered successfully! Tx: ${receipt.hash}`);
-      fetchContractStats(contract);
-      refreshBalances();
-    } catch (err: unknown) {
-      console.error(err);
-      setRegisterError(getFriendlyTransactionError(err, 'Document registration failed. Please try again.'));
+      setCatalog(await loadRegistryCatalog(targetProvider, settings.factoryAddress));
+    } catch (error) {
+      setCatalogError(errorMessage(error, 'Could not load the registry catalog.'));
+      setCatalog([]);
     } finally {
-      setIsRegistering(false);
+      setCatalogLoading(false);
     }
   };
 
-  const handleLookupDocument = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!contract) return;
-    setIsLookingUp(true);
-    setLookupResult(null);
-    setLookupError(null);
+  useEffect(() => {
+    if (provider && settings.factoryAddress) refreshCatalog();
+  }, [provider, settings.factoryAddress]);
 
+  const openRegistry = async (address: string, name?: string) => {
+    if (!provider) return;
+    setEntriesLoading(true);
+    setWorkspaceError('');
     try {
-      const isReg = await contract.isRegistered(lookupHash);
-      if (!isReg) {
-        setLookupResult({
-          searched: true,
-          exists: false
-        });
-        return;
-      }
+      if (!isAddress(address)) throw new Error('Enter a valid registry contract address.');
+      const code = await provider.getCode(address);
+      if (code === '0x') throw new Error('No contract was found at this address on the connected network.');
+      const contract = new Contract(address, registryAbi, provider);
+      const [owner, count] = await Promise.all([contract.owner(), contract.documentCount()]);
+      const resolvedName = name || catalog.find((item) => item.address.toLowerCase() === address.toLowerCase())?.name || 'Uncatalogued registry';
+      const entries = await loadRegistryEntries(provider, address, resolvedName, settings.scanFromBlock);
+      setRegistryAddress(address);
+      setRegistryAddressInput(address);
+      setRegistryName(resolvedName);
+      setRegistryOwner(owner);
+      setDocumentCount(Number(count));
+      setRegistryEntries(entries);
+      setPage('registry');
+    } catch (error) {
+      setWorkspaceError(errorMessage(error, 'Could not open this registry.'));
+    } finally {
+      setEntriesLoading(false);
+    }
+  };
 
-      const [uploader, uri, timestamp] = await contract.getDocument(lookupHash);
-      setLookupResult({
-        searched: true,
-        exists: true,
-        uploader,
-        metadataURI: uri,
-        timestamp: new Date(Number(timestamp) * 1000).toLocaleString()
+  const refreshCurrentRegistry = async () => {
+    if (registryAddress) await openRegistry(registryAddress, registryName);
+    await refreshBalances();
+    await refreshCatalog();
+  };
+
+  const loadOwnedEntries = async () => {
+    if (!provider || !selectedAddress) return;
+    setMyEntriesLoading(true);
+    setWorkspaceError('');
+    try {
+      const targets = catalog.length
+        ? catalog.map((item) => ({ address: item.address, name: item.name }))
+        : registryAddress ? [{ address: registryAddress, name: registryName }] : [];
+      const grouped = await Promise.all(targets.map((target) =>
+        loadRegistryEntries(provider, target.address, target.name, settings.scanFromBlock, selectedAddress)));
+      setMyEntries(grouped.flat().sort((a, b) => b.blockNumber - a.blockNumber));
+    } catch (error) {
+      setWorkspaceError(errorMessage(error, 'Could not load entries uploaded by this wallet.'));
+    } finally {
+      setMyEntriesLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (page === 'entries' && connected && selectedAddress) loadOwnedEntries();
+  }, [page, selectedAddress, catalog.length]);
+
+  const runTransaction = async (work: (signer: Signer) => Promise<any>, success: string) => {
+    setIsWorking(true);
+    setActionStatus('');
+    setActionError('');
+    try {
+      const transaction = await work(await getSigner());
+      await transaction.wait();
+      setActionStatus(success);
+      await refreshBalances();
+      return true;
+    } catch (error) {
+      setActionError(errorMessage(error, 'The transaction failed.'));
+      return false;
+    } finally {
+      setIsWorking(false);
+    }
+  };
+
+  const createRegistry = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!settings.factoryAddress) return setActionError('Configure or deploy a registry factory in Settings first.');
+    const ok = await runTransaction(async (signer) =>
+      new Contract(settings.factoryAddress, factoryAbi, signer).createRegistry(registryForm.name.trim(), registryForm.metadataURI.trim()),
+    'Registry created and added to the public catalog.');
+    if (ok) {
+      setRegistryForm({ name: '', metadataURI: '' });
+      await refreshCatalog();
+    }
+  };
+
+  const importRegistry = async () => {
+    if (!settings.factoryAddress) return setActionError('Configure a registry factory first.');
+    const ok = await runTransaction(async (signer) =>
+      new Contract(settings.factoryAddress, factoryAbi, signer).importRegistry(importAddress, registryForm.name.trim(), registryForm.metadataURI.trim()),
+    'Existing registry imported into the catalog.');
+    if (ok) {
+      setImportAddress('');
+      await refreshCatalog();
+    }
+  };
+
+  const deployFactory = async () => {
+    setIsWorking(true);
+    setActionError('');
+    try {
+      const factory = await new ContractFactory(factoryAbi, factoryBytecode, await getSigner()).deploy();
+      await factory.waitForDeployment();
+      const address = await factory.getAddress();
+      const next = { ...settings, factoryAddress: address };
+      setSettings(next);
+      saveSettings(next);
+      setActionStatus(`Factory deployed at ${address}`);
+      await refreshBalances();
+    } catch (error) {
+      setActionError(errorMessage(error, 'Factory deployment failed.'));
+    } finally {
+      setIsWorking(false);
+    }
+  };
+
+  const deployStandaloneRegistry = async () => {
+    setIsWorking(true);
+    setActionError('');
+    try {
+      const signer = await getSigner();
+      const address = await signer.getAddress();
+      const registry = await new ContractFactory(registryAbi, registryBytecode, signer).deploy(address);
+      await registry.waitForDeployment();
+      const deployedAddress = await registry.getAddress();
+      setActionStatus(`Standalone registry deployed at ${deployedAddress}`);
+      await refreshBalances();
+      await openRegistry(deployedAddress, 'My standalone registry');
+    } catch (error) {
+      setActionError(errorMessage(error, 'Registry deployment failed.'));
+    } finally {
+      setIsWorking(false);
+    }
+  };
+
+  const processFile = async (file: File) => {
+    setFileName(file.name);
+    setFileSize(file.size < 1024 * 1024 ? `${(file.size / 1024).toFixed(1)} KB` : `${(file.size / 1024 / 1024).toFixed(2)} MB`);
+    const hash = ethers.keccak256(new Uint8Array(await file.arrayBuffer()));
+    setDocumentHash(hash);
+    setLookupHash(hash);
+  };
+
+  const validateMetadata = async () => {
+    if (!isHttpUrl(metadataURI)) throw new Error('Use a direct HTTP or HTTPS file URL.');
+    try {
+      const response = await fetch(metadataURI);
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const remoteHash = ethers.keccak256(new Uint8Array(await response.arrayBuffer()));
+      if (remoteHash.toLowerCase() !== documentHash.toLowerCase()) throw new Error('The linked file does not match the selected file hash.');
+    } catch (browserError) {
+      const response = await fetch('/api/validate-uri', {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ uri: metadataURI, expectedHash: documentHash }),
       });
-    } catch (err: any) {
-      console.error(err);
-      setLookupError(err.reason || err.message || 'Lookup failed');
-    } finally {
-      setIsLookingUp(false);
+      const result = await response.json();
+      if (!response.ok || !result.ok) throw new Error(result.error || 'The linked file does not match the selected file hash.');
     }
   };
 
-  const handleRevokeDocument = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!contract) return;
-    setIsRevoking(true);
-    setRevokeSuccess(null);
-    setRevokeError(null);
-
+  const registerDocument = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!registryAddress) return;
+    setIsWorking(true);
+    setActionError('');
+    setActionStatus('');
     try {
-      const signer = await getActiveSigner();
-      const contractWithSigner = contract.connect(signer) as Contract;
-      
-      const tx = await contractWithSigner.revokeDocument(revokeHash);
-      const receipt = await tx.wait();
-      
-      setRevokeSuccess(`Revoked successfully! Tx: ${receipt.hash}`);
-      setRevokeHash('');
-      fetchContractStats(contract);
-      refreshBalances();
-    } catch (err: unknown) {
-      console.error(err);
-      setRevokeError(getFriendlyTransactionError(err, 'Document revocation failed. Please try again.'));
+      await validateMetadata();
+      const contract = new Contract(registryAddress, registryAbi, await getSigner());
+      const transaction = await contract.registerDocument(documentHash, metadataURI.trim());
+      await transaction.wait();
+      setActionStatus('Document registered successfully.');
+      await refreshCurrentRegistry();
+    } catch (error) {
+      setActionError(errorMessage(error, 'Document registration failed.'));
     } finally {
-      setIsRevoking(false);
+      setIsWorking(false);
     }
   };
 
-  const handleTransferOwnership = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!contract) return;
-    setIsTransferring(true);
-    setTransferSuccess(null);
-    setTransferError(null);
-
+  const verifyDocument = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!provider || !registryAddress) return;
+    setLookup(null);
+    setActionError('');
     try {
-      const signer = await getActiveSigner();
-      const contractWithSigner = contract.connect(signer) as Contract;
-      
-      const tx = await contractWithSigner.transferOwnership(newOwnerAddress);
-      const receipt = await tx.wait();
-      
-      setTransferSuccess(`Ownership transferred successfully! Tx: ${receipt.hash}`);
-      setNewOwnerAddress('');
-      fetchContractStats(contract);
-      refreshBalances();
-    } catch (err: unknown) {
-      console.error(err);
-      setTransferError(getFriendlyTransactionError(err, 'Ownership transfer failed. Please try again.'));
-    } finally {
-      setIsTransferring(false);
+      const contract = new Contract(registryAddress, registryAbi, provider);
+      if (!(await contract.isRegistered(lookupHash))) return setLookup({ exists: false });
+      const document = await contract.getDocument(lookupHash);
+      setLookup({ exists: true, uploader: document[0], metadataURI: document[1], timestamp: Number(document[2]) });
+    } catch (error) {
+      setActionError(errorMessage(error, 'Document verification failed.'));
     }
   };
 
-  const triggerCopy = (text: string) => {
-    navigator.clipboard.writeText(text);
-    setCopyFeedback(text);
-    setTimeout(() => {
-      setCopyFeedback(null);
-    }, 2000);
+  const revokeDocument = async (hash: string) => {
+    const ok = await runTransaction(async (signer) =>
+      new Contract(registryAddress, registryAbi, signer).revokeDocument(hash), 'Document revoked.');
+    if (ok) await refreshCurrentRegistry();
   };
 
-  // Show auth gate if not logged in
-  if (!currentUser) {
-    return <AuthPage onAuthSuccess={handleAuthSuccess} />;
-  }
+  const transferOwnership = async (event: React.FormEvent) => {
+    event.preventDefault();
+    const ok = await runTransaction(async (signer) =>
+      new Contract(registryAddress, registryAbi, signer).transferOwnership(newOwner), 'Registry ownership transferred.');
+    if (ok) {
+      setNewOwner('');
+      await refreshCurrentRegistry();
+    }
+  };
+
+  const handleAuthSuccess = (username: string) => {
+    localStorage.setItem(SESSION_KEY, username);
+    setCurrentUser(username);
+  };
+  const logout = () => {
+    localStorage.removeItem(SESSION_KEY);
+    setCurrentUser(null);
+    disconnect();
+  };
+  const copy = (value: string) => navigator.clipboard.writeText(value);
+
+  if (!currentUser) return <AuthPage onAuthSuccess={handleAuthSuccess} />;
+
+  const navItems: { id: Page; label: string; icon: React.ReactNode }[] = [
+    { id: 'dashboard', label: 'Dashboard', icon: <Gauge size={18} /> },
+    { id: 'entries', label: 'My Entries', icon: <FileCheck2 size={18} /> },
+    { id: 'explore', label: 'Explore', icon: <Compass size={18} /> },
+    { id: 'registry', label: 'Registry', icon: <Layers size={18} /> },
+    { id: 'settings', label: 'Settings', icon: <Settings size={18} /> },
+  ];
 
   return (
-    <div className="app-container">
-      {/* Top Glass Header */}
-      <header className="glass-header">
-        <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
-          <Layers size={28} style={{ color: '#6366f1' }} />
+    <div className="product-shell">
+      <aside className="app-sidebar">
+        <button className="brand-button" onClick={() => setPage('dashboard')}>
+          <span className="brand-mark"><Layers size={22} /></span>
+          <span><strong>DocRegistry</strong><small>Trusted on-chain</small></span>
+        </button>
+        <nav className="app-nav">
+          {navItems.map((item) => (
+            <button key={item.id} className={page === item.id ? 'active' : ''} onClick={() => { setSearch(''); setPage(item.id); }}>
+              {item.icon}<span>{item.label}</span>
+            </button>
+          ))}
+        </nav>
+        <div className="sidebar-profile">
+          <div className="user-chip-avatar">{currentUser.charAt(0)}</div>
+          <div><strong>{currentUser}</strong><small>Local profile</small></div>
+          <button className="icon-button" onClick={logout} title="Log out"><LogOut size={16} /></button>
+        </div>
+      </aside>
+
+      <div className="app-stage">
+        <header className="product-header">
           <div>
-            <h1>Document Registry</h1>
-            <p style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>Decentralized Document Verification</p>
+            <p className="eyebrow">{page === 'registry' ? registryName : navItems.find((item) => item.id === page)?.label}</p>
+            <h1>{page === 'dashboard' ? `Welcome back, ${currentUser}` : page === 'entries' ? 'Documents uploaded by you' : page === 'explore' ? 'Explore registries' : page === 'settings' ? 'Network & wallet settings' : 'Registry workspace'}</h1>
           </div>
-        </div>
-        
-        <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap' }}>
-          {/* Logged-in user chip */}
-          <div className="user-chip">
-            <div className="user-chip-avatar">{currentUser.charAt(0)}</div>
-            <span>{currentUser}</span>
-          </div>
-
-          {/* Network status */}
-          <div className="status-indicator">
-            <div className={`status-dot ${isConnected ? 'connected' : 'disconnected'}`}></div>
-            <span style={{ color: isConnected ? '#34d399' : '#f87171' }}>
-              {isConnected ? (useMetaMask ? 'MetaMask' : 'Local RPC') : 'Disconnected'}
+          <button className="wallet-pill" onClick={() => setPage('settings')}>
+            <span className={`status-dot ${connected ? 'connected' : 'disconnected'}`} />
+            <span className="wallet-pill-copy">
+              <strong>{connected ? shortAddress(selectedAddress) : 'Connect wallet'}</strong>
+              <small>{connected ? `${formatNativeBalance(selectedAccount?.balance ?? '0')} ${settings.nativeSymbol} · ${networkName}` : 'Open Settings'}</small>
             </span>
-            <button 
-              className="btn btn-secondary btn-small" 
-              onClick={() => connectToNode()}
-              style={{ marginLeft: '0.25rem', padding: '0.25rem 0.5rem' }}
-            >
-              <RotateCw size={14} />
-            </button>
-          </div>
-
-          {/* Logout button */}
-          <button id="btn-logout" className="btn-logout" onClick={handleLogout}>
-            <LogOut size={14} />
-            Logout
+            <WalletCards size={19} />
           </button>
-        </div>
-      </header>
+        </header>
 
-      {/* Main Grid: Sidebar (RPC/Accounts) + Right Content Panels */}
-      <div className="dashboard-grid">
-        
-        {/* LEFT COLUMN: Sidebar (RPC Connection, Accounts) */}
-        <aside className="workspace-panels">
-          
-          {/* RPC Connection Card */}
-          <div className="glass-card primary-edge">
-            <h3 style={{ marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-              <Cpu size={18} style={{ color: 'var(--primary)' }} />
-              Network Connection
-            </h3>
-            
-            <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '1rem' }}>
-               <button className="btn btn-primary" style={{ flex: 1 }} onClick={connectMetaMask} disabled={isConnecting}>
-                  {useMetaMask ? 'MetaMask Connected' : 'Connect MetaMask'}
-               </button>
-            </div>
+        <main className="page-content">
+          {actionStatus && <Notice kind="success" text={actionStatus} onClose={() => setActionStatus('')} />}
+          {actionError && <Notice kind="error" text={actionError} onClose={() => setActionError('')} />}
+          {workspaceError && <Notice kind="error" text={workspaceError} onClose={() => setWorkspaceError('')} />}
 
-            <div style={{ margin: '1rem 0', textAlign: 'center', color: 'var(--text-secondary)', fontSize: '0.8rem' }}>OR CONNECT LOCAL NODE</div>
-            
-            <div className="form-group">
-              <label className="form-label">JSON-RPC URL</label>
-              <div className="input-container">
-                <input 
-                  type="text" 
-                  className="form-input" 
-                  value={rpcUrl}
-                  onChange={(e) => setRpcUrl(e.target.value)}
-                  placeholder="http://127.0.0.1:8545" 
-                />
-              </div>
-            </div>
-
-            <button 
-              className="btn btn-primary" 
-              style={{ width: '100%' }}
-              onClick={() => connectToNode()}
-              disabled={isConnecting}
-            >
-              {isConnecting ? <span className="spinner"></span> : 'Connect to Node'}
-            </button>
-
-            {connectionError && (
-              <div className="verification-result not-found" style={{ marginTop: '1rem', padding: '0.75rem' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.8rem' }}>
-                  <AlertTriangle size={16} />
-                  <span>{connectionError}</span>
-                </div>
-              </div>
-            )}
-          </div>
-
-          {/* Accounts List / Active Signer Select */}
-          {isConnected && (
-            <div className="glass-card">
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
-                <h3 style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                  <User size={18} style={{ color: 'var(--primary)' }} />
-                  Test Accounts
-                </h3>
-                <button className="copy-button" onClick={refreshBalances} title="Refresh balances">
-                  <RotateCw size={14} />
-                </button>
-              </div>
-
-              {!isUsingCustomWallet ? (
-                <>
-                  <p style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginBottom: '0.75rem' }}>
-                    {useMetaMask ? 'MetaMask account currently connected.' : 'Select an unlocked local account. The Hardhat node will sign the transactions automatically.'}
-                  </p>
-                  
-                  <div className="accounts-container">
-                    {accounts.map((acc) => {
-                      const isAccOwner = acc.address.toLowerCase() === owner.toLowerCase();
-                      const isSelected = selectedAddress === acc.address;
-                      return (
-                        <div 
-                          key={acc.address}
-                          className={`account-item ${isSelected ? 'active' : ''}`}
-                          onClick={() => setSelectedAddress(acc.address)}
-                        >
-                          <div className="account-header">
-                            <span className="account-address">
-                              {acc.address.substring(0, 8)}...{acc.address.substring(34)}
-                            </span>
-                            {isAccOwner && <span className="badge badge-owner">Owner</span>}
-                          </div>
-                          <span className="account-balance">{acc.balance} ETH</span>
-                        </div>
-                      );
-                    })}
-                  </div>
-                  
-                  <div style={{ borderTop: '1px solid var(--border-subtle)', marginTop: '1rem', paddingTop: '1rem' }}>
-                    <label className="form-label" style={{ fontSize: '0.75rem' }}>Or use custom private key</label>
-                    <div style={{ display: 'flex', gap: '0.5rem' }}>
-                      <input 
-                        type="password"
-                        className="form-input"
-                        placeholder="Private Key (0x...)"
-                        value={customPrivateKey}
-                        onChange={(e) => setCustomPrivateKey(e.target.value)}
-                        style={{ fontSize: '0.8rem', padding: '0.5rem' }}
-                      />
-                      <button 
-                        className="btn btn-secondary btn-small"
-                        onClick={handleApplyCustomPrivateKey}
-                      >
-                        <Plus size={14} />
-                      </button>
-                    </div>
-                  </div>
-                </>
-              ) : (
-                <div>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
-                    <span className="badge badge-primary">Custom Burner Wallet Active</span>
-                    <button className="btn btn-secondary btn-small" onClick={handleUseNodeAccounts}>
-                      Use Node Accounts
-                    </button>
-                  </div>
-                  
-                  <div className="account-item active" style={{ cursor: 'default' }}>
-                    <div className="account-header">
-                      <span className="account-address">
-                        {selectedAddress?.substring(0, 10)}...{selectedAddress?.substring(32)}
-                      </span>
-                      {selectedAddress?.toLowerCase() === owner.toLowerCase() && (
-                        <span className="badge badge-owner">Owner</span>
-                      )}
-                    </div>
-                    <span className="account-balance">Custom Wallet Mode</span>
-                  </div>
-                </div>
-              )}
-            </div>
-          )}
-        </aside>
-
-        {/* RIGHT COLUMN: Contract Settings & Interactions */}
-        <main className="workspace-panels">
-          
-          {/* Contract Loader & Statistics */}
-          {isConnected && (
-            <div className="glass-card">
-              <h3 style={{ marginBottom: '1.25rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                <Layers size={18} style={{ color: 'var(--primary)' }} />
-                Smart Contract Connection
-              </h3>
-              
-              <div style={{ display: 'flex', gap: '1rem', alignItems: 'flex-end', flexWrap: 'wrap', marginBottom: '1.5rem' }}>
-                <div style={{ flex: 1, minWidth: '250px' }}>
-                  <label className="form-label">Contract Address</label>
-                  <input 
-                    type="text" 
-                    className="form-input" 
-                    value={contractAddress}
-                    onChange={(e) => setContractAddress(e.target.value)}
-                    placeholder="0x5FbDB2315678afecb367f032d93F642f64180aa3" 
-                  />
-                </div>
-                <div style={{ display: 'flex', gap: '0.5rem' }}>
-                  <button 
-                    className="btn btn-secondary" 
-                    onClick={() => handleLoadContract()}
-                    disabled={!contractAddress}
-                  >
-                    Load Instance
-                  </button>
-                  <button 
-                    className="btn btn-primary" 
-                    onClick={handleDeployContract}
-                    disabled={isDeploying}
-                  >
-                    {isDeploying ? <span className="spinner"></span> : 'Deploy Contract'}
-                  </button>
-                </div>
-              </div>
-
-              {contractError && (
-                <div className="verification-result not-found" style={{ marginTop: '0px', marginBottom: '1.5rem', padding: '0.75rem' }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.85rem' }}>
-                    <AlertTriangle size={16} />
-                    <span>{contractError}</span>
-                  </div>
-                </div>
-              )}
-
-              {/* Show Stats if Contract Loaded */}
-              {contract && (
-                <div className="stats-grid">
-                  <div className="stat-box">
-                    <div className="stat-label">Contract Owner</div>
-                    <div className="stat-value" style={{ fontSize: '0.9rem', fontFamily: 'monospace', wordBreak: 'break-all' }}>
-                      {owner ? `${owner.substring(0, 10)}...${owner.substring(32)}` : 'Unknown'}
-                      <button className="copy-button" onClick={() => triggerCopy(owner)} style={{ marginLeft: '0.25rem' }}>
-                        <Clipboard size={12} />
-                      </button>
-                    </div>
-                  </div>
-                  
-                  <div className="stat-box">
-                    <div className="stat-label">Document Count</div>
-                    <div className="stat-value">
-                      {documentCount !== null ? documentCount : '0'}
-                    </div>
-                  </div>
-                </div>
-              )}
-
-              {!contract && (
-                <div style={{ padding: '1rem', background: 'rgba(255, 255, 255, 0.02)', border: '1px dashed var(--border-subtle)', borderRadius: '0.75rem', textAlign: 'center', color: 'var(--text-secondary)' }}>
-                  Deploy a new instance or input an existing address to unlock interactive features.
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* Interactive Actions Panels (Require Contract Loaded) */}
-          {isConnected && contract && (
+          {page === 'dashboard' && (
             <>
-              {/* File Drop & In-Browser Hashing */}
-              <div className="glass-card">
-                <h3 style={{ marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                  <FileText size={18} style={{ color: 'var(--primary)' }} />
-                  Drag & Drop Hashing Tool
-                </h3>
-                
-                <div 
-                  className={`drag-zone ${isDragging ? 'dragging' : ''}`}
-                  onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }}
-                  onDragLeave={() => setIsDragging(false)}
-                  onDrop={handleFileDrop}
-                  onClick={() => document.getElementById('file-picker')?.click()}
-                >
-                  <input 
-                    type="file" 
-                    id="file-picker" 
-                    style={{ display: 'none' }} 
-                    onChange={handleFileInput} 
-                  />
-                  <Upload size={32} className="drag-zone-icon" />
-                  <div className="drag-zone-text">
-                    Drag and drop your file here, or click to browse
-                  </div>
-                  <div className="drag-zone-sub">
-                    Keccak-256 hash is computed client-side inside the browser. No file data is uploaded.
-                  </div>
-                </div>
-
-                {isHashing && (
-                  <div style={{ marginTop: '1rem', textAlign: 'center' }}>
-                    <span className="spinner" style={{ marginRight: '0.5rem' }}></span>
-                    Computing Keccak-256 hash...
-                  </div>
-                )}
-
-                {fileName && computedHash && (
-                  <div className="file-info-card">
-                    <div className="file-info-header">
-                      <span className="file-info-name">
-                        <FileText size={14} />
-                        {fileName}
-                      </span>
-                      <span className="file-info-size">{fileSize}</span>
+              {!connected && <EmptyState icon={<WalletCards size={34} />} title="Connect your blockchain account" body="Your network and wallet are now configured in one place." action="Open Settings" onAction={() => setPage('settings')} />}
+              {connected && (
+                <>
+                  <section className="metric-grid">
+                    <Metric label="Wallet balance" value={`${formatNativeBalance(selectedAccount?.balance ?? '0')} ${settings.nativeSymbol}`} hint={balanceUpdatedAt ? `Updated ${balanceUpdatedAt.toLocaleTimeString()}` : 'Live network balance'} />
+                    <Metric label="My discovered registries" value={String(catalog.filter((item) => item.owner.toLowerCase() === selectedAddress.toLowerCase()).length)} hint={`${catalog.length} total in catalog`} />
+                    <Metric label="Open registry entries" value={registryAddress ? String(documentCount) : '—'} hint={registryAddress ? registryName : 'Choose a registry'} />
+                  </section>
+                  <section className="dashboard-columns">
+                    <div className="glass-card primary-edge">
+                      <div className="section-heading"><div><p className="eyebrow">Identity</p><h2>Your blockchain profile</h2></div><UserRound size={22} /></div>
+                      <div className="identity-address"><span>{selectedAddress}</span><button className="icon-button" onClick={() => copy(selectedAddress)}><Clipboard size={15} /></button></div>
+                      <p className="muted">The connected wallet is the authority for ownership and uploads. Your username is only a local display profile.</p>
+                      <button className="btn btn-secondary" onClick={() => setPage('entries')}>View my entries</button>
                     </div>
-                    <div className="file-info-hash">
-                      <span>{computedHash}</span>
-                      <button className="copy-button" onClick={() => triggerCopy(computedHash)} title="Copy Hash">
-                        <Clipboard size={14} />
-                      </button>
+                    <div className="glass-card">
+                      <div className="section-heading"><div><p className="eyebrow">Continue</p><h2>{registryAddress ? registryName : 'Choose a registry'}</h2></div><Activity size={22} /></div>
+                      <p className="muted">{registryAddress ? `${documentCount} active documents at ${shortAddress(registryAddress)}.` : 'Browse the on-chain catalog or open a known address.'}</p>
+                      <button className="btn btn-primary" onClick={() => setPage(registryAddress ? 'registry' : 'explore')}>{registryAddress ? 'Open workspace' : 'Explore registries'}</button>
                     </div>
-                    <div style={{ display: 'flex', gap: '0.5rem', marginTop: '0.25rem' }}>
-                      <span className="badge badge-success">Hash Computed</span>
-                      {copyFeedback === computedHash && <span className="badge badge-primary">Copied!</span>}
-                    </div>
-                  </div>
-                )}
-              </div>
-
-              {/* TWO COLUMN WORKSPACE: Register + Verify */}
-              <div className="two-column-workspace">
-                
-                {/* Panel: Register Document */}
-                <div className="glass-card">
-                  <h3 style={{ marginBottom: '1.25rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                    <Plus size={18} style={{ color: 'var(--success)' }} />
-                    Register Document
-                  </h3>
-                  
-                  <form onSubmit={handleRegisterDocument}>
-                    <div className="form-group">
-                      <label className="form-label">Document Hash (bytes32)</label>
-                      <input 
-                        type="text" 
-                        className="form-input" 
-                        required
-                        placeholder="0x..." 
-                        value={registerHash}
-                        onChange={(e) => setRegisterHash(e.target.value)}
-                      />
-                    </div>
-                    
-                    <div className="form-group">
-                      <label className="form-label">File URL</label>
-                      <input 
-                        type="text" 
-                        className="form-input" 
-                        required
-                        placeholder="https://example.com/document.pdf" 
-                        value={metadataURI}
-                        onChange={(e) => setMetadataURI(e.target.value)}
-                      />
-                      <div className="form-help">
-                        Use a direct http or https file link. CORS-enabled locations are validated in the browser; public links fall back to local server validation.
-                      </div>
-                    </div>
-
-                    <button 
-                      type="submit" 
-                      className="btn btn-success" 
-                      style={{ width: '100%', marginTop: '0.5rem' }}
-                      disabled={isRegistering || !registerHash}
-                    >
-                      {isRegistering ? <span className="spinner"></span> : 'Register On-Chain'}
-                    </button>
-                  </form>
-
-                  {registerSuccess && (
-                    <div className="verification-result found" style={{ padding: '0.75rem' }}>
-                      <div className="result-message">
-                        <CheckCircle size={16} style={{ marginTop: '0.1rem', flexShrink: 0 }} />
-                        <span className="result-value">{registerSuccess}</span>
-                      </div>
-                    </div>
-                  )}
-
-                  {registerError && (
-                    <div className="verification-result not-found" style={{ padding: '0.75rem' }}>
-                      <div className="result-message">
-                        <AlertTriangle size={16} style={{ marginTop: '0.1rem', flexShrink: 0 }} />
-                        <span className="result-value">{registerError}</span>
-                      </div>
-                    </div>
-                  )}
-                </div>
-
-                {/* Panel: Lookup / Verify */}
-                <div className="glass-card">
-                  <h3 style={{ marginBottom: '1.25rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                    <Search size={18} style={{ color: 'var(--primary)' }} />
-                    Verify Document
-                  </h3>
-                  
-                  <form onSubmit={handleLookupDocument}>
-                    <div className="form-group">
-                      <label className="form-label">Document Hash (bytes32)</label>
-                      <input 
-                        type="text" 
-                        className="form-input" 
-                        required
-                        placeholder="0x..." 
-                        value={lookupHash}
-                        onChange={(e) => setLookupHash(e.target.value)}
-                      />
-                    </div>
-
-                    <button 
-                      type="submit" 
-                      className="btn btn-primary" 
-                      style={{ width: '100%', marginTop: '2.5rem' }}
-                      disabled={isLookingUp || !lookupHash}
-                    >
-                      {isLookingUp ? <span className="spinner"></span> : 'Verify Hash'}
-                    </button>
-                  </form>
-
-                  {lookupResult && lookupResult.searched && (
-                    lookupResult.exists ? (
-                      <div className="verification-result found">
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontWeight: 600 }}>
-                          <CheckCircle size={18} style={{ color: 'var(--success)' }} />
-                          <span style={{ color: '#fff' }}>VERIFIED REGISTRATION</span>
-                        </div>
-                        <div className="result-body">
-                          <div className="result-row">
-                            <span className="result-label">Uploader:</span>
-                            <span className="result-value result-value-mono">{lookupResult.uploader}</span>
-                          </div>
-                          <div className="result-row">
-                            <span className="result-label">Metadata:</span>
-                            <span className="result-value">{lookupResult.metadataURI}</span>
-                          </div>
-                          <div className="result-row">
-                            <span className="result-label">Registered At:</span>
-                            <span className="result-value">{lookupResult.timestamp}</span>
-                          </div>
-                        </div>
-                      </div>
-                    ) : (
-                      <div className="verification-result not-found">
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontWeight: 600 }}>
-                          <AlertTriangle size={18} style={{ color: 'var(--error)' }} />
-                          <span style={{ color: '#fff' }}>NOT REGISTERED</span>
-                        </div>
-                        <p style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
-                          This hash does not exist in the contract registry.
-                        </p>
-                      </div>
-                    )
-                  )}
-
-                  {lookupError && (
-                    <div className="verification-result not-found" style={{ padding: '0.75rem' }}>
-                      <div className="result-message">
-                        <AlertTriangle size={16} style={{ marginTop: '0.1rem', flexShrink: 0 }} />
-                        <span className="result-value">{lookupError}</span>
-                      </div>
-                    </div>
-                  )}
-                </div>
-
-              </div>
-
-              {/* TWO COLUMN WORKSPACE: Admin Controls & Event Activity Feed */}
-              <div className="two-column-workspace">
-                
-                {/* Panel: Admin / Owner Actions */}
-                <div className="glass-card error-edge">
-                  <h3 style={{ marginBottom: '1.25rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                    <Shield size={18} style={{ color: 'var(--error)' }} />
-                    Owner Controls
-                  </h3>
-                  
-                  {/* Warning if not Owner */}
-                  {selectedAddress?.toLowerCase() !== owner.toLowerCase() && (
-                    <div style={{ display: 'flex', gap: '0.5rem', padding: '0.75rem', background: 'rgba(245, 158, 11, 0.05)', border: '1px solid rgba(245, 158, 11, 0.25)', borderRadius: '0.5rem', fontSize: '0.8rem', marginBottom: '1rem', color: '#fcd34d' }}>
-                      <AlertTriangle size={16} style={{ flexShrink: 0, marginTop: '0.1rem' }} />
-                      <span>
-                        Active account is not the owner. Transactions will revert unless you switch to the owner account.
-                      </span>
-                    </div>
-                  )}
-
-                  {/* Revoke Doc Form */}
-                  <form onSubmit={handleRevokeDocument} style={{ marginBottom: '1.5rem' }}>
-                    <div className="form-group">
-                      <label className="form-label" style={{ fontSize: '0.8rem' }}>Revoke Document by Hash</label>
-                      <div style={{ display: 'flex', gap: '0.5rem' }}>
-                        <input 
-                          type="text" 
-                          className="form-input" 
-                          required
-                          placeholder="0x..." 
-                          value={revokeHash}
-                          onChange={(e) => setRevokeHash(e.target.value)}
-                          style={{ fontSize: '0.85rem' }}
-                        />
-                        <button 
-                          type="submit" 
-                          className="btn btn-danger btn-small"
-                          disabled={isRevoking || !revokeHash}
-                          style={{ flexShrink: 0 }}
-                        >
-                          {isRevoking ? <span className="spinner"></span> : <Trash2 size={16} />}
-                        </button>
-                      </div>
-                    </div>
-                    {revokeSuccess && <p style={{ fontSize: '0.8rem', color: '#34d399', wordBreak: 'break-all' }}>{revokeSuccess}</p>}
-                    {revokeError && <p style={{ fontSize: '0.8rem', color: '#f87171' }}>{revokeError}</p>}
-                  </form>
-
-                  {/* Transfer Ownership Form */}
-                  <form onSubmit={handleTransferOwnership}>
-                    <div className="form-group">
-                      <label className="form-label" style={{ fontSize: '0.8rem' }}>Transfer Contract Ownership</label>
-                      <div style={{ display: 'flex', gap: '0.5rem' }}>
-                        <input 
-                          type="text" 
-                          className="form-input" 
-                          required
-                          placeholder="New owner address (0x...)" 
-                          value={newOwnerAddress}
-                          onChange={(e) => setNewOwnerAddress(e.target.value)}
-                          style={{ fontSize: '0.85rem' }}
-                        />
-                        <button 
-                          type="submit" 
-                          className="btn btn-primary btn-small"
-                          disabled={isTransferring || !newOwnerAddress}
-                          style={{ flexShrink: 0 }}
-                        >
-                          {isTransferring ? <span className="spinner"></span> : <ArrowRightLeft size={16} />}
-                        </button>
-                      </div>
-                    </div>
-                    {transferSuccess && <p style={{ fontSize: '0.8rem', color: '#34d399', wordBreak: 'break-all' }}>{transferSuccess}</p>}
-                    {transferError && <p style={{ fontSize: '0.8rem', color: '#f87171' }}>{transferError}</p>}
-                  </form>
-                </div>
-
-                {/* Panel: Activity Feed */}
-                <div className="glass-card">
-                  <h3 style={{ marginBottom: '1.25rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                    <Activity size={18} style={{ color: 'var(--primary)' }} />
-                    Live Activity Logs
-                  </h3>
-
-                  <div className="logs-container">
-                    {events.length === 0 ? (
-                      <p style={{ color: 'var(--text-secondary)', textAlign: 'center', padding: '1rem', fontSize: '0.85rem' }}>
-                        No events logged yet. Try registering or revoking a document!
-                      </p>
-                    ) : (
-                      events.map((ev, index) => (
-                        <div 
-                          key={`${ev.txHash}-${index}`}
-                          className={`log-item ${ev.type === 'registered' ? 'register' : 'revoke'}`}
-                        >
-                          <div className="log-item-header">
-                            <span className="log-item-title">
-                              {ev.type === 'registered' ? 'Document Registered' : 'Document Revoked'}
-                            </span>
-                            <span className="log-item-time">Block {ev.blockNumber}</span>
-                          </div>
-                          
-                          <div className="log-item-details">
-                            <div className="log-item-row">
-                              <span className="log-item-label">Hash:</span>
-                              <span className="log-item-value">{ev.docHash.substring(0, 14)}...{ev.docHash.substring(50)}</span>
-                            </div>
-                            <div className="log-item-row">
-                              <span className="log-item-label">
-                                {ev.type === 'registered' ? 'Uploader:' : 'Revoker:'}
-                              </span>
-                              <span className="log-item-value">{ev.actor.substring(0, 8)}...{ev.actor.substring(34)}</span>
-                            </div>
-                            {ev.type === 'registered' && (
-                              <div className="log-item-row">
-                                <span className="log-item-label">Time:</span>
-                                <span className="log-item-value" style={{ fontFamily: 'sans-serif' }}>{ev.timestamp}</span>
-                              </div>
-                            )}
-                          </div>
-                        </div>
-                      ))
-                    )}
-                  </div>
-                </div>
-
-              </div>
+                  </section>
+                </>
+              )}
             </>
           )}
 
-          {/* Node Instructions if Disconnected */}
-          {!isConnected && (
-            <div className="glass-card error-edge" style={{ padding: '2rem', textAlign: 'center' }}>
-              <AlertTriangle size={48} style={{ color: 'var(--error)', marginBottom: '1rem' }} />
-              <h2 style={{ marginBottom: '0.75rem' }}>Local Hardhat Node Required</h2>
-              <p style={{ color: 'var(--text-secondary)', maxWidth: '500px', margin: '0 auto 1.5rem' }}>
-                To interactively test your smart contract without browser extensions, please make sure your local Hardhat node is running and the contracts are compiled.
-              </p>
-              
-              <div style={{ background: 'rgba(0,0,0,0.3)', border: '1px solid var(--border-subtle)', borderRadius: '0.75rem', padding: '1rem', margin: '0 auto 1.5rem', maxWidth: '500px', textAlign: 'left', fontFamily: 'monospace', fontSize: '0.85rem' }}>
-                <p style={{ color: 'var(--primary)', marginBottom: '0.5rem' }}># Step 1: Start the Hardhat Node</p>
-                <p style={{ color: '#fff', marginBottom: '1rem' }}>npx hardhat node</p>
-                
-                <p style={{ color: 'var(--primary)', marginBottom: '0.5rem' }}># Step 2: Compile & Deploy Document Registry</p>
-                <p style={{ color: '#fff' }}>npx hardhat ignition deploy ignition/DocumentRegistry.ts --network localhost</p>
+          {page === 'settings' && (
+            <section className="settings-grid">
+              <div className="glass-card primary-edge">
+                <div className="section-heading"><div><p className="eyebrow">Connection</p><h2>Choose how to connect</h2></div><WalletCards size={22} /></div>
+                <div className="segmented-control">
+                  <button className={settings.connectionMode === 'metamask' ? 'active' : ''} onClick={() => setSettings({ ...settings, connectionMode: 'metamask' })}>MetaMask</button>
+                  <button className={settings.connectionMode === 'rpc' ? 'active' : ''} onClick={() => setSettings({ ...settings, connectionMode: 'rpc' })}>JSON-RPC</button>
+                </div>
+                {settings.connectionMode === 'rpc' && <Field label="JSON-RPC URL" value={settings.rpcUrl} onChange={(rpcUrl) => setSettings({ ...settings, rpcUrl })} placeholder={DEFAULT_SETTINGS.rpcUrl} />}
+                <button className="btn btn-primary full-width" disabled={isConnecting} onClick={settings.connectionMode === 'metamask' ? connectMetaMask : connectRpc}>{isConnecting ? 'Connecting…' : connected ? 'Reconnect' : 'Connect'}</button>
+                {connectionError && <p className="field-error">{connectionError}</p>}
+                {connected && <div className="connection-readout"><CheckCircle size={17} /><span><strong>{networkName}</strong><small>Chain ID {chainId?.toString()} · {connectionMode}</small></span><button className="btn btn-secondary btn-small" onClick={() => disconnect()}>Disconnect</button></div>}
+                {connectionMode === 'rpc' && accounts.length > 1 && <div className="form-group"><label className="form-label">Active unlocked account</label><select className="form-input" value={selectedAddress} onChange={(event) => setSelectedAddress(event.target.value)}>{accounts.map((account) => <option key={account.address} value={account.address}>{shortAddress(account.address)} · {formatNativeBalance(account.balance)} {settings.nativeSymbol}</option>)}</select></div>}
               </div>
-
-              <button className="btn btn-primary" onClick={() => connectToNode()}>
-                <RotateCw size={16} /> Reconnect
-              </button>
-            </div>
+              <div className="glass-card">
+                <div className="section-heading"><div><p className="eyebrow">Network metadata</p><h2>Display & discovery</h2></div><Settings size={22} /></div>
+                <Field label="Native currency symbol" value={settings.nativeSymbol} onChange={(nativeSymbol) => setSettings({ ...settings, nativeSymbol })} placeholder="ETH" />
+                <Field label="Block explorer URL (optional)" value={settings.explorerUrl} onChange={(explorerUrl) => setSettings({ ...settings, explorerUrl })} placeholder="https://sepolia.etherscan.io" />
+                <Field label="Registry factory address" value={settings.factoryAddress} onChange={(factoryAddress) => setSettings({ ...settings, factoryAddress })} placeholder="0x…" />
+                <Field label="Scan logs from block" value={String(settings.scanFromBlock)} onChange={(value) => setSettings({ ...settings, scanFromBlock: Math.max(0, Number(value) || 0) })} placeholder="0" type="number" />
+                <button className="btn btn-primary full-width" onClick={() => { saveSettings(settings); setActionStatus('Network preferences saved in this browser.'); }}>Save settings</button>
+              </div>
+              <div className="glass-card settings-wide">
+                <div className="section-heading"><div><p className="eyebrow">Development tools</p><h2>Deploy network contracts</h2></div><Shield size={22} /></div>
+                <p className="muted">Deploy a catalog factory once per network. Standalone registries remain available for development and can later be imported by their owner.</p>
+                <div className="button-row"><button className="btn btn-primary" disabled={!connected || isWorking} onClick={deployFactory}>Deploy catalog factory</button><button className="btn btn-secondary" disabled={!connected || isWorking} onClick={deployStandaloneRegistry}>Deploy standalone registry</button></div>
+              </div>
+            </section>
           )}
 
+          {page === 'explore' && (
+            <>
+              {!connected ? <EmptyState icon={<Compass size={34} />} title="Connect before exploring" body="Registry discovery follows the network selected in Settings." action="Open Settings" onAction={() => setPage('settings')} /> : (
+                <>
+                  <section className="dashboard-columns">
+                    <form className="glass-card primary-edge" onSubmit={createRegistry}>
+                      <div className="section-heading"><div><p className="eyebrow">Publish</p><h2>Create a named registry</h2></div><Plus size={22} /></div>
+                      <Field label="Registry name" value={registryForm.name} onChange={(name) => setRegistryForm({ ...registryForm, name })} placeholder="Legal documents" />
+                      <Field label="Profile or metadata URI (optional)" value={registryForm.metadataURI} onChange={(metadataURI) => setRegistryForm({ ...registryForm, metadataURI })} placeholder="ipfs://… or https://…" />
+                      <button className="btn btn-primary full-width" disabled={!settings.factoryAddress || !registryForm.name.trim() || isWorking}>Create registry</button>
+                    </form>
+                    <div className="glass-card">
+                      <div className="section-heading"><div><p className="eyebrow">Migration</p><h2>Import an existing registry</h2></div><ArrowRightLeft size={22} /></div>
+                      <Field label="Existing contract address" value={importAddress} onChange={setImportAddress} placeholder="0x…" />
+                      <p className="muted">Use the name and metadata from the create form. The connected wallet must currently own this registry.</p>
+                      <button className="btn btn-secondary full-width" disabled={!settings.factoryAddress || !isAddress(importAddress) || !registryForm.name.trim() || isWorking} onClick={importRegistry}>Import into catalog</button>
+                    </div>
+                  </section>
+                  <section className="glass-card">
+                    <div className="section-heading"><div><p className="eyebrow">On-chain catalog</p><h2>{catalog.length} discoverable registries</h2></div><button className="icon-button" onClick={() => refreshCatalog()}><RefreshCw size={17} /></button></div>
+                    {!settings.factoryAddress ? <InlineEmpty text="Set a registry factory address in Settings to enable discovery." /> : catalogLoading ? <InlineEmpty text="Loading registries from the blockchain…" /> : catalogError ? <InlineEmpty text={catalogError} /> : catalog.length === 0 ? <InlineEmpty text="This factory does not have any registries yet." /> : <div className="registry-grid">{catalog.map((item) => <RegistryCard key={item.address} item={item} activeAddress={selectedAddress} explorerUrl={settings.explorerUrl} onOpen={() => openRegistry(item.address, item.name)} />)}</div>}
+                  </section>
+                  <section className="glass-card compact-card"><div className="manual-open"><div><strong>Open an uncatalogued registry</strong><p className="muted">Useful for existing or independently deployed contracts.</p></div><input className="form-input" value={registryAddressInput} onChange={(event) => setRegistryAddressInput(event.target.value)} placeholder="Registry address (0x…)" /><button className="btn btn-secondary" disabled={!isAddress(registryAddressInput) || entriesLoading} onClick={() => openRegistry(registryAddressInput)}>Open</button></div></section>
+                </>
+              )}
+            </>
+          )}
+
+          {page === 'entries' && (
+            !connected ? <EmptyState icon={<FileCheck2 size={34} />} title="Connect to see your entries" body="Entries are matched to the active blockchain wallet—not the local username." action="Open Settings" onAction={() => setPage('settings')} /> :
+              <section className="glass-card">
+                <div className="section-heading"><div><p className="eyebrow">Wallet ownership</p><h2>Uploaded by {shortAddress(selectedAddress)}</h2></div><button className="icon-button" onClick={loadOwnedEntries}><RefreshCw size={17} /></button></div>
+                <SearchBox value={search} onChange={setSearch} placeholder="Search hash, URI, or registry…" />
+                {myEntriesLoading ? <InlineEmpty text="Scanning indexed registration events…" /> : visibleMyEntries.length === 0 ? <InlineEmpty text={catalog.length || registryAddress ? 'No entries were uploaded by this wallet.' : 'Configure a catalog or open a registry first.'} /> : <EntryTable entries={visibleMyEntries} explorerUrl={settings.explorerUrl} onRegistry={(entry) => openRegistry(entry.registryAddress, entry.registryName)} />}
+              </section>
+          )}
+
+          {page === 'registry' && (
+            !connected ? <EmptyState icon={<Layers size={34} />} title="Connect to open a registry" body="Select your network and wallet before loading contract data." action="Open Settings" onAction={() => setPage('settings')} /> : !registryAddress ?
+              <EmptyState icon={<Layers size={34} />} title="No registry selected" body="Choose one from the catalog or open a known contract address." action="Explore registries" onAction={() => setPage('explore')} /> : (
+                <>
+                  <section className="registry-hero glass-card primary-edge">
+                    <div><p className="eyebrow">{currentRegistry ? 'Cataloged registry' : 'Direct contract'}</p><h2>{registryName}</h2><div className="identity-address"><span>{registryAddress}</span><button className="icon-button" onClick={() => copy(registryAddress)}><Clipboard size={15} /></button>{explorerLink(settings.explorerUrl, 'address', registryAddress) && <a className="icon-button" href={explorerLink(settings.explorerUrl, 'address', registryAddress)} target="_blank" rel="noreferrer"><ExternalLink size={15} /></a>}</div></div>
+                    <div className="registry-stats"><span><strong>{documentCount}</strong><small>active entries</small></span><span><strong>{shortAddress(registryOwner)}</strong><small>owner</small></span><button className="icon-button" onClick={refreshCurrentRegistry}><RefreshCw size={17} /></button></div>
+                  </section>
+                  <section className="dashboard-columns">
+                    <div className="glass-card">
+                      <div className="section-heading"><div><p className="eyebrow">Local hashing</p><h2>Select a document</h2></div><Upload size={22} /></div>
+                      <label className="file-drop"><input type="file" onChange={(event) => event.target.files?.[0] && processFile(event.target.files[0])} /><Upload size={28} /><strong>{fileName || 'Choose a file to hash'}</strong><small>{fileName ? fileSize : 'The file never leaves your browser.'}</small></label>
+                      {documentHash && <div className="hash-readout"><span>{documentHash}</span><button className="icon-button" onClick={() => copy(documentHash)}><Clipboard size={14} /></button></div>}
+                    </div>
+                    <form className="glass-card" onSubmit={registerDocument}>
+                      <div className="section-heading"><div><p className="eyebrow">Write</p><h2>Register document</h2></div><FileText size={22} /></div>
+                      <Field label="Document hash" value={documentHash} onChange={setDocumentHash} placeholder="0x…" />
+                      <Field label="Direct file URL" value={metadataURI} onChange={setMetadataURI} placeholder="https://…" />
+                      <button className="btn btn-primary full-width" disabled={!documentHash || !metadataURI || isWorking}>Validate and register</button>
+                    </form>
+                  </section>
+                  <section className="dashboard-columns">
+                    <form className="glass-card" onSubmit={verifyDocument}>
+                      <div className="section-heading"><div><p className="eyebrow">Read</p><h2>Verify a document</h2></div><Search size={22} /></div>
+                      <Field label="Document hash" value={lookupHash} onChange={setLookupHash} placeholder="0x…" />
+                      <button className="btn btn-secondary full-width" disabled={!lookupHash}>Verify hash</button>
+                      {lookup && <div className={`verification-result ${lookup.exists ? 'found' : 'not-found'}`}><strong>{lookup.exists ? 'Verified registration' : 'Not registered'}</strong>{lookup.exists && <div className="result-body"><span>Uploader: {lookup.uploader}</span><span>Metadata: {lookup.metadataURI}</span><span>Registered: {new Date((lookup.timestamp ?? 0) * 1000).toLocaleString()}</span></div>}</div>}
+                    </form>
+                    <form className="glass-card" onSubmit={transferOwnership}>
+                      <div className="section-heading"><div><p className="eyebrow">Administration</p><h2>Owner controls</h2></div><Shield size={22} /></div>
+                      {!isRegistryOwner && <p className="field-warning"><AlertTriangle size={15} />Only {shortAddress(registryOwner)} can use these actions.</p>}
+                      <Field label="Transfer to address" value={newOwner} onChange={setNewOwner} placeholder="0x…" />
+                      <button className="btn btn-secondary full-width" disabled={!isRegistryOwner || !isAddress(newOwner) || isWorking}>Transfer ownership</button>
+                    </form>
+                  </section>
+                  <section className="glass-card">
+                    <div className="section-heading"><div><p className="eyebrow">Browse</p><h2>Registry entries</h2></div><span className="badge badge-primary">{registryEntries.filter((entry) => entry.active).length} active</span></div>
+                    <SearchBox value={search} onChange={setSearch} placeholder="Search by hash, uploader, or metadata…" />
+                    {entriesLoading ? <InlineEmpty text="Loading registry history…" /> : visibleRegistryEntries.length === 0 ? <InlineEmpty text="This registry has no matching entries." /> : <EntryTable entries={visibleRegistryEntries} explorerUrl={settings.explorerUrl} canRevoke={isRegistryOwner} onRevoke={revokeDocument} />}
+                  </section>
+                </>
+              )
+          )}
         </main>
       </div>
     </div>
   );
+}
+
+function Field({ label, value, onChange, placeholder, type = 'text' }: { label: string; value: string; onChange: (value: string) => void; placeholder?: string; type?: string }) {
+  return <div className="form-group"><label className="form-label">{label}</label><input className="form-input" type={type} value={value} onChange={(event) => onChange(event.target.value)} placeholder={placeholder} /></div>;
+}
+
+function Metric({ label, value, hint }: { label: string; value: string; hint: string }) {
+  return <div className="metric-card"><span>{label}</span><strong>{value}</strong><small>{hint}</small></div>;
+}
+
+function Notice({ kind, text, onClose }: { kind: 'success' | 'error'; text: string; onClose: () => void }) {
+  return <div className={`page-notice ${kind}`}><span>{kind === 'success' ? <CheckCircle size={17} /> : <AlertTriangle size={17} />}{text}</span><button onClick={onClose}>×</button></div>;
+}
+
+function EmptyState({ icon, title, body, action, onAction }: { icon: React.ReactNode; title: string; body: string; action: string; onAction: () => void }) {
+  return <div className="glass-card empty-state">{icon}<h2>{title}</h2><p>{body}</p><button className="btn btn-primary" onClick={onAction}>{action}</button></div>;
+}
+
+function InlineEmpty({ text }: { text: string }) {
+  return <div className="inline-empty">{text}</div>;
+}
+
+function SearchBox({ value, onChange, placeholder }: { value: string; onChange: (value: string) => void; placeholder: string }) {
+  return <div className="search-box"><Search size={17} /><input value={value} onChange={(event) => onChange(event.target.value)} placeholder={placeholder} /></div>;
+}
+
+function RegistryCard({ item, activeAddress, explorerUrl, onOpen }: { item: RegistrySummary; activeAddress: string; explorerUrl: string; onOpen: () => void }) {
+  const owned = !!activeAddress && item.owner.toLowerCase() === activeAddress.toLowerCase();
+  return <article className="registry-card"><div className="registry-card-top"><span className="registry-icon"><Layers size={20} /></span>{owned && <span className="badge badge-owner">Owned by you</span>}</div><h3>{item.name}</h3><p>{item.metadataURI || 'No public description provided.'}</p><div className="registry-card-meta"><span>{item.documentCount} documents</span><span>Owner {shortAddress(item.owner)}</span><span>{new Date(item.createdAt * 1000).toLocaleDateString()}</span></div><div className="button-row"><button className="btn btn-primary btn-small" onClick={onOpen}>Browse</button>{explorerLink(explorerUrl, 'address', item.address) && <a className="btn btn-secondary btn-small" href={explorerLink(explorerUrl, 'address', item.address)} target="_blank" rel="noreferrer">Explorer <ExternalLink size={13} /></a>}</div></article>;
+}
+
+function EntryTable({ entries, explorerUrl, canRevoke, onRevoke, onRegistry }: { entries: RegistryEntry[]; explorerUrl: string; canRevoke?: boolean; onRevoke?: (hash: string) => void; onRegistry?: (entry: RegistryEntry) => void }) {
+  return <div className="entry-list">{entries.map((entry) => <article className="entry-row" key={`${entry.registryAddress}-${entry.hash}`}><div className={`entry-status ${entry.active ? 'active' : 'revoked'}`}><FileCheck2 size={18} /></div><div className="entry-main"><div><strong>{entry.registryName}</strong><span className={`badge ${entry.active ? 'badge-success' : 'badge-revoked'}`}>{entry.active ? 'Active' : 'Revoked'}</span></div><code>{entry.hash}</code><small>{entry.metadataURI || 'Metadata unavailable after revocation'} · {new Date(entry.timestamp * 1000).toLocaleString()}</small></div><div className="entry-actions">{onRegistry && <button className="icon-button" title="Open registry" onClick={() => onRegistry(entry)}><Layers size={15} /></button>}{explorerLink(explorerUrl, 'tx', entry.transactionHash) && <a className="icon-button" title="Open transaction" href={explorerLink(explorerUrl, 'tx', entry.transactionHash)} target="_blank" rel="noreferrer"><ExternalLink size={15} /></a>}{canRevoke && entry.active && onRevoke && <button className="icon-button danger" title="Revoke" onClick={() => onRevoke(entry.hash)}><Trash2 size={15} /></button>}</div></article>)}</div>;
 }
